@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cello Play-Along &amp; Tuner</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Header: Music Title & File Upload -->
+    <header class="top-bar">
+      <div class="title-block">
+        <span class="app-badge">Cello Play-Along</span>
+        <h1 id="music-title" class="music-title">Cello Suite No. 1 — Prelude (Sample)</h1>
+        <p id="music-subtitle" class="music-subtitle">Bass Clef · G Major · 4/4</p>
+      </div>
+
+      <div class="file-actions">
+        <select id="part-select" class="part-select hidden" aria-label="Select instrument part"></select>
+
+        <select id="sample-select" class="sample-select" aria-label="Load built-in sample">
+          <option value="bach">Sample: Bach Prelude</option>
+          <option value="scale">Sample: Cello G Major Scale</option>
+        </select>
+
+        <input
+          type="file"
+          id="file-input"
+          accept=".xml,.musicxml,.mxl"
+          class="sr-only"
+        />
+        <button type="button" id="browse-btn" class="btn btn-primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+          Browse MusicXML
+        </button>
+      </div>
+    </header>
+
+    <!-- Tuner Panel Above the Staff -->
+    <section class="tuner-panel" aria-label="Live Cello Tuner">
+      <div class="tuner-left">
+        <button type="button" id="mic-btn" class="btn btn-mic" aria-pressed="false">
+          <span class="mic-dot" id="mic-dot"></span>
+          <span id="mic-btn-label">Start Tuner</span>
+        </button>
+        <div class="note-readouts">
+          <div class="readout-box">
+            <span class="readout-label">Target</span>
+            <span id="target-note" class="readout-value target-val">—</span>
+          </div>
+          <div class="readout-box">
+            <span class="readout-label">You Play</span>
+            <span id="detected-note" class="readout-value detected-val">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Center Visual Tuner: Green Dot, Yellow Flat/Sharp Needle, Red Off -->
+      <div class="tuner-center">
+        <div class="status-lights" aria-live="polite">
+          <div class="light-item" id="light-flat">
+            <span class="dir-arrow" aria-hidden="true">◀</span>
+            <span class="light-dot yellow-dot"></span>
+            <span class="light-label">Flat</span>
+          </div>
+
+          <div class="light-item" id="light-intune">
+            <span class="light-dot green-dot"></span>
+            <span class="light-label">In Tune</span>
+          </div>
+
+          <div class="light-item" id="light-sharp">
+            <span class="light-dot yellow-dot"></span>
+            <span class="dir-arrow" aria-hidden="true">▶</span>
+            <span class="light-label">Sharp</span>
+          </div>
+
+          <div class="light-divider"></div>
+
+          <div class="light-item" id="light-off">
+            <span class="light-dot red-dot"></span>
+            <span class="light-label">Off</span>
+          </div>
+        </div>
+
+        <!-- Needle Gauge -->
+        <div class="gauge-wrap">
+          <span class="gauge-end">♭ Flat</span>
+          <div class="gauge-track" id="gauge-track">
+            <div class="gauge-zone gauge-zone-red-left"></div>
+            <div class="gauge-zone gauge-zone-yellow-left"></div>
+            <div class="gauge-zone gauge-zone-green"></div>
+            <div class="gauge-zone gauge-zone-yellow-right"></div>
+            <div class="gauge-zone gauge-zone-red-right"></div>
+            <div class="gauge-center-tick"></div>
+            <div class="gauge-needle" id="gauge-needle"></div>
+          </div>
+          <span class="gauge-end">Sharp ♯</span>
+        </div>
+      </div>
+
+      <div class="tuner-right">
+        <div id="tuner-status-text" class="tuner-status-text">Mic Off</div>
+        <div id="cents-readout" class="cents-readout">0 cents</div>
+      </div>
+    </section>
+
+    <!-- Scrolling Staff Panel -->
+    <main class="staff-section">
+      <div class="staff-header-strip">
+        <span id="measure-indicator" class="measure-indicator">Measure 1 / 1</span>
+        <span class="staff-hint">Drag staff left/right to scrub · Press Space to play/pause</span>
+        <div class="staff-toggles">
+          <label class="toggle-chip">
+            <input type="checkbox" id="toggle-labels" checked />
+            <span>Note Names</span>
+          </label>
+          <label class="toggle-chip">
+            <input type="checkbox" id="toggle-metronome" />
+            <span>Metronome</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="staff-canvas-container" id="staff-container">
+        <canvas id="staff-canvas" aria-label="Scrolling musical staff"></canvas>
+      </div>
+
+      <!-- Progress Scrubber -->
+      <div class="progress-bar-wrap">
+        <input
+          type="range"
+          id="progress-slider"
+          min="0"
+          max="100"
+          step="0.05"
+          value="0"
+          aria-label="Song position"
+        />
+      </div>
+    </main>
+
+    <!-- Transport & Tempo Controls -->
+    <footer class="controls-bar">
+      <div class="transport-group">
+        <button type="button" id="restart-btn" class="btn btn-secondary" title="Restart (R)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="1 4 1 10 7 10"></polyline>
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+          </svg>
+          Restart
+        </button>
+
+        <button type="button" id="play-btn" class="btn btn-play" title="Play / Pause (Space)">
+          <svg id="play-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <polygon points="6 3 20 12 6 21 6 3"></polygon>
+          </svg>
+          <svg id="pause-icon" class="hidden" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <rect x="6" y="4" width="4" height="16"></rect>
+            <rect x="14" y="4" width="4" height="16"></rect>
+          </svg>
+          <span id="play-btn-label">Play</span>
+        </button>
+      </div>
+
+      <!-- Tempo Slider -->
+      <div class="tempo-group">
+        <div class="tempo-labels">
+          <label for="tempo-slider" class="tempo-title">Tempo</label>
+          <span id="tempo-bpm-display" class="tempo-value">72 BPM (100%)</span>
+        </div>
+        <div class="tempo-slider-row">
+          <span class="tempo-bound">Slow</span>
+          <input
+            type="range"
+            id="tempo-slider"
+            min="25"
+            max="150"
+            step="1"
+            value="100"
+            aria-label="Tempo speed percentage"
+          />
+          <span class="tempo-bound">Fast</span>
+          <button type="button" id="tempo-reset-btn" class="btn-link" title="Reset to original tempo">100%</button>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <script src="musicxml.js"></script>
+  <script src="tuner.js"></script>
+  <script src="staff.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
