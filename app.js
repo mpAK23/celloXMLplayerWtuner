@@ -1,20 +1,22 @@
 /**
  * app.js
- * Main application controller connecting MusicXML loading, scrolling staff playback,
- * real-time cello tuner UI, tempo slider, and optional metronome.
+ * Main application controller connecting MusicXML loading (1-line solo & 2-line duets),
+ * scrolling staff playback, per-line Tone.js cello audio playback, real-time cello tuner
+ * against the selected line, tempo slider, and optional metronome.
  */
 
 (() => {
   // DOM Elements
   const musicTitleEl = document.getElementById('music-title');
+  const musicFilenameEl = document.getElementById('music-filename');
   const musicSubtitleEl = document.getElementById('music-subtitle');
-  const partSelectEl = document.getElementById('part-select');
-  const sampleSelectEl = document.getElementById('sample-select');
+  const recentSelectEl = document.getElementById('recent-select');
   const fileInputEl = document.getElementById('file-input');
   const browseBtn = document.getElementById('browse-btn');
 
   const micBtn = document.getElementById('mic-btn');
   const micBtnLabel = document.getElementById('mic-btn-label');
+  const targetNoteLabelEl = document.getElementById('target-note-label');
   const targetNoteEl = document.getElementById('target-note');
   const detectedNoteEl = document.getElementById('detected-note');
 
@@ -27,8 +29,11 @@
   const centsReadoutEl = document.getElementById('cents-readout');
 
   const measureIndicatorEl = document.getElementById('measure-indicator');
+  const audioStatusPillEl = document.getElementById('audio-status-pill');
   const toggleLabelsEl = document.getElementById('toggle-labels');
   const toggleMetronomeEl = document.getElementById('toggle-metronome');
+  const staffStageEl = document.getElementById('staff-stage');
+  const lineControlsRailEl = document.getElementById('line-controls-rail');
   const staffContainerEl = document.getElementById('staff-container');
   const staffCanvasEl = document.getElementById('staff-canvas');
   const progressSliderEl = document.getElementById('progress-slider');
@@ -46,14 +51,20 @@
   // State
   const staff = new StaffRenderer(staffCanvasEl, staffContainerEl);
   let currentScore = null;
-  let currentPart = null;
+  let currentLines = [];
 
+  // Per-line toggles
+  let lineSoundEnabled = [false, true];
+  let tunerLineIndex = 0;
+
+  // Playback state
   let isPlaying = false;
   let currentBeat = 0;
   let baseTempo = 72;
   let tempoPercent = 100;
   let lastFrameTime = null;
   let lastMetronomeBeat = -1;
+  let needsInitialAudioTrigger = true;
 
   // Lightweight Web Audio synth for optional metronome click
   let metroCtx = null;
@@ -79,6 +90,23 @@
     } catch (_) {}
   }
 
+  // Subscribe to CelloAudio sample loading status
+  CelloAudio.onStatusChange((status) => {
+    if (!audioStatusPillEl) return;
+    audioStatusPillEl.classList.remove('ready', 'loading');
+    if (status === 'ready') {
+      audioStatusPillEl.textContent = 'Cello Sound: Sampled Ready';
+      audioStatusPillEl.classList.add('ready');
+    } else if (status === 'loading') {
+      audioStatusPillEl.textContent = 'Cello Sound: Loading Samples…';
+      audioStatusPillEl.classList.add('loading');
+    } else if (status === 'fallback') {
+      audioStatusPillEl.textContent = 'Cello Sound: Synth Fallback';
+    } else {
+      audioStatusPillEl.textContent = 'Cello Sound: Ready';
+    }
+  });
+
   function getEffectiveBpm() {
     return Math.max(15, Math.round((baseTempo * tempoPercent) / 100));
   }
@@ -88,35 +116,127 @@
     tempoBpmDisplayEl.textContent = `${bpm} BPM (${tempoPercent}%)`;
   }
 
-  function loadScore(score) {
-    currentScore = score;
-    musicTitleEl.textContent = score.title || 'Untitled Score';
+  /**
+   * Build the per-line Sound & Tuner tick cards in the left rail directly beside each staff line.
+   */
+  function renderLineControls() {
+    lineControlsRailEl.innerHTML = '';
 
-    // Populate part selector if multi-part
-    if (score.parts.length > 1) {
-      partSelectEl.innerHTML = '';
-      score.parts.forEach((p, i) => {
-        const opt = document.createElement('option');
-        opt.value = String(i);
-        opt.textContent = p.partName;
-        partSelectEl.appendChild(opt);
+    currentLines.forEach((line, idx) => {
+      const isTuner = idx === tunerLineIndex;
+      const isSound = Boolean(lineSoundEnabled[idx]);
+
+      const card = document.createElement('div');
+      card.className = `line-control-card${isTuner ? ' tuner-selected' : ''}`;
+      card.dataset.lineIndex = String(idx);
+
+      const titleRow = document.createElement('div');
+      titleRow.className = 'line-card-title';
+      titleRow.innerHTML = `
+        <span>${line.displayLabel || `Line ${idx + 1}`}</span>
+        ${isTuner ? '<span class="line-card-badge">Active</span>' : ''}
+      `;
+
+      const tickGroup = document.createElement('div');
+      tickGroup.className = 'line-tick-group';
+
+      // Tick 1: Play Cello Sound (independent checkbox per line)
+      const soundLabel = document.createElement('label');
+      soundLabel.className = `line-tick sound-tick${isSound ? ' is-checked' : ''}`;
+      soundLabel.title = `Play cello audio for ${line.displayLabel}`;
+      const soundCb = document.createElement('input');
+      soundCb.type = 'checkbox';
+      soundCb.checked = isSound;
+      soundCb.setAttribute('aria-label', `Play sound for ${line.displayLabel}`);
+      soundCb.addEventListener('change', async () => {
+        lineSoundEnabled[idx] = soundCb.checked;
+        soundLabel.classList.toggle('is-checked', soundCb.checked);
+        if (soundCb.checked) {
+          await CelloAudio.ensureStarted();
+        } else if (!lineSoundEnabled.some(Boolean)) {
+          CelloAudio.stopAll();
+        }
       });
-      partSelectEl.value = String(score.defaultPartIndex);
-      partSelectEl.classList.remove('hidden');
-    } else {
-      partSelectEl.classList.add('hidden');
-    }
+      const soundText = document.createElement('span');
+      soundText.textContent = 'Sound';
+      soundLabel.appendChild(soundCb);
+      soundLabel.appendChild(soundText);
 
-    selectPart(score.defaultPartIndex);
+      // Tick 2: Check Accuracy with Tuner (mutually exclusive radio toggle)
+      const tunerLabel = document.createElement('label');
+      tunerLabel.className = `line-tick tuner-tick${isTuner ? ' is-checked' : ''}`;
+      tunerLabel.title = `Check intonation accuracy against ${line.displayLabel}`;
+      const tunerRadio = document.createElement('input');
+      tunerRadio.type = 'radio';
+      tunerRadio.name = 'tuner-line';
+      tunerRadio.value = String(idx);
+      tunerRadio.checked = isTuner;
+      tunerRadio.setAttribute('aria-label', `Check tuner accuracy on ${line.displayLabel}`);
+      tunerRadio.addEventListener('change', () => {
+        if (tunerRadio.checked) {
+          tunerLineIndex = idx;
+          staff.setTunerLineIndex(tunerLineIndex);
+          updateTargetLabel();
+          renderLineControls();
+        }
+      });
+      const tunerText = document.createElement('span');
+      tunerText.textContent = 'Tuner';
+      tunerLabel.appendChild(tunerRadio);
+      tunerLabel.appendChild(tunerText);
+
+      tickGroup.appendChild(soundLabel);
+      tickGroup.appendChild(tunerLabel);
+
+      card.appendChild(titleRow);
+      card.appendChild(tickGroup);
+      lineControlsRailEl.appendChild(card);
+    });
   }
 
-  function selectPart(index) {
-    if (!currentScore || !currentScore.parts[index]) return;
-    currentPart = currentScore.parts[index];
-    staff.setPart(currentPart);
+  function updateTargetLabel() {
+    const line = currentLines[tunerLineIndex];
+    const name = line ? (line.displayLabel || `Line ${tunerLineIndex + 1}`) : 'Line 1';
+    if (targetNoteLabelEl) {
+      targetNoteLabelEl.textContent = currentLines.length > 1 ? `Target (${name})` : 'Target';
+    }
+  }
 
-    musicSubtitleEl.textContent = `${currentPart.partName} · ${currentPart.subtitle}`;
-    baseTempo = currentPart.initialTempo || 72;
+  function loadScore(score) {
+    currentScore = score;
+    currentLines = score.lines || [];
+
+    // Display title & filename clearly
+    musicTitleEl.textContent = score.title || score.fileName || 'Untitled Score';
+    if (score.fileName) {
+      musicFilenameEl.textContent = score.fileName;
+      musicFilenameEl.classList.remove('hidden');
+    } else {
+      musicFilenameEl.textContent = '';
+      musicFilenameEl.classList.add('hidden');
+    }
+    musicSubtitleEl.textContent = score.subtitle || '';
+
+    // Default per-line toggles:
+    // - 2-line duet: Line 1 = Tuner (Sound OFF so you play it), Line 2 = Sound ON (accompaniment)
+    // - 1-line solo: Line 1 = Tuner (Sound OFF so tuner hears you cleanly)
+    tunerLineIndex = 0;
+    if (currentLines.length >= 2) {
+      lineSoundEnabled = [false, true];
+    } else {
+      lineSoundEnabled = [false];
+    }
+
+    // Adjust staff stage height for 1-line vs 2-line layout
+    staffStageEl.classList.toggle('two-line', currentLines.length >= 2);
+    staff.setLines(currentLines);
+    staff.setTunerLineIndex(tunerLineIndex);
+    staff.resize();
+
+    renderLineControls();
+    updateTargetLabel();
+
+    baseTempo = score.initialTempo || 72;
     tempoPercent = 100;
     tempoSliderEl.value = '100';
     updateTempoDisplay();
@@ -125,16 +245,19 @@
   }
 
   function clearNoteEvaluations() {
-    if (!currentPart) return;
-    for (const n of currentPart.notes) {
-      n.evalState = null;
+    for (const line of currentLines) {
+      for (const n of line.notes) {
+        n.evalState = null;
+      }
     }
   }
 
   function resetPlayback() {
     setPlaying(false);
+    CelloAudio.stopAll();
     currentBeat = 0;
     lastMetronomeBeat = -1;
+    needsInitialAudioTrigger = true;
     clearNoteEvaluations();
     syncProgressUI();
   }
@@ -142,65 +265,100 @@
   function setPlaying(playing) {
     isPlaying = playing;
     lastFrameTime = null;
+    if (playing) {
+      needsInitialAudioTrigger = true;
+    } else {
+      CelloAudio.stopAll();
+    }
     playBtn.classList.toggle('playing', isPlaying);
     playIcon.classList.toggle('hidden', isPlaying);
     pauseIcon.classList.toggle('hidden', !isPlaying);
     playBtnLabel.textContent = isPlaying ? 'Pause' : 'Play';
   }
 
-  function findActiveNote(beat) {
-    if (!currentPart) return null;
-    // Prefer pitched notes over rests if overlapping
+  /**
+   * Returns all active notes at `beat` for a given line (supports chords / double-stops).
+   */
+  function findActiveNotesForLine(line, beat) {
+    if (!line) return [];
+    const pitched = [];
     let foundRest = null;
-    for (const n of currentPart.notes) {
+    for (const n of line.notes) {
       if (beat >= n.startBeat && beat < n.endBeat) {
-        if (!n.isRest) return n;
-        foundRest = n;
+        if (!n.isRest) pitched.push(n);
+        else foundRest = n;
       }
       if (n.startBeat > beat) break;
     }
-    return foundRest;
+    if (pitched.length > 0) return pitched;
+    return foundRest ? [foundRest] : [];
   }
 
   function findCurrentMeasure(beat) {
-    if (!currentPart || currentPart.measures.length === 0) return { number: '1', index: 0, total: 1 };
-    for (let i = 0; i < currentPart.measures.length; i++) {
-      const m = currentPart.measures[i];
+    const primary = currentLines[0];
+    if (!primary || primary.measures.length === 0) {
+      return { number: '1', index: 0, total: 1, measure: null };
+    }
+    for (let i = 0; i < primary.measures.length; i++) {
+      const m = primary.measures[i];
       if (beat >= m.startBeat && beat < m.endBeat) {
-        return { number: m.number, index: i, total: currentPart.measures.length, measure: m };
+        return { number: m.number, index: i, total: primary.measures.length, measure: m };
       }
     }
-    const last = currentPart.measures[currentPart.measures.length - 1];
-    return { number: last.number, index: currentPart.measures.length - 1, total: currentPart.measures.length, measure: last };
+    const last = primary.measures[primary.measures.length - 1];
+    return { number: last.number, index: primary.measures.length - 1, total: primary.measures.length, measure: last };
   }
 
   function syncProgressUI() {
-    if (!currentPart || currentPart.totalBeats <= 0) {
+    const totalBeats = currentScore ? currentScore.totalBeats : 0;
+    if (totalBeats <= 0) {
       progressSliderEl.value = '0';
       measureIndicatorEl.textContent = 'Measure 1 / 1';
       return;
     }
-    const pct = Math.max(0, Math.min(100, (currentBeat / currentPart.totalBeats) * 100));
+    const pct = Math.max(0, Math.min(100, (currentBeat / totalBeats) * 100));
     progressSliderEl.value = pct.toFixed(2);
 
     const mInfo = findCurrentMeasure(currentBeat);
     measureIndicatorEl.textContent = `Measure ${mInfo.number} / ${mInfo.total}`;
   }
 
-  function updateTunerUI(activeNote, res) {
-    // Target note display
-    if (activeNote && !activeNote.isRest) {
-      targetNoteEl.textContent = activeNote.noteName;
-    } else if (activeNote && activeNote.isRest) {
+  /**
+   * Trigger cello audio notes whose startBeat falls within [windowStart, windowEnd).
+   */
+  function triggerAudioInRange(windowStart, windowEnd, includeStartBoundary) {
+    const secPerBeat = 60 / getEffectiveBpm();
+    const eps = 1e-4;
+
+    currentLines.forEach((line, idx) => {
+      if (!lineSoundEnabled[idx]) return;
+      for (const note of line.notes) {
+        if (note.isRest || note.tieFromPrev) continue;
+        const afterStart = includeStartBoundary
+          ? note.startBeat >= windowStart - eps
+          : note.startBeat > windowStart - eps;
+        if (afterStart && note.startBeat < windowEnd - eps) {
+          const beatsDur = note.tiedDurationBeats || note.durationBeats;
+          const durSec = Math.max(0.08, beatsDur * secPerBeat * 0.94);
+          CelloAudio.playNote(note.midi, durSec, 0.85);
+        }
+        if (note.startBeat >= windowEnd) break;
+      }
+    });
+  }
+
+  function updateTunerUI(tunerActiveNotes, res) {
+    const pitched = tunerActiveNotes.filter((n) => !n.isRest);
+    if (pitched.length > 0) {
+      targetNoteEl.textContent = pitched.map((n) => n.noteName).join(' / ');
+    } else if (tunerActiveNotes.length > 0 && tunerActiveNotes[0].isRest) {
       targetNoteEl.textContent = 'Rest';
     } else {
       targetNoteEl.textContent = '—';
     }
 
-    // Detected note display
     detectedNoteEl.textContent = res.detectedNoteName;
 
-    // Reset all lights
     lightFlatEl.classList.remove('active');
     lightInTuneEl.classList.remove('active');
     lightSharpEl.classList.remove('active');
@@ -246,16 +404,53 @@
   }
 
   /**
+   * Sample tuner against the active note(s) on the selected tuner line.
+   * If the tuner line has a chord (double-stop), evaluate against the closest chord tone.
+   */
+  function evaluateTunerForNotes(activeNotes) {
+    const pitched = activeNotes.filter((n) => !n.isRest);
+    if (pitched.length <= 1) {
+      return CelloTuner.sample(pitched[0] || activeNotes[0] || null);
+    }
+
+    // Multiple chord notes: sample once against the first, then re-evaluate against closest pitch
+    const baseRes = CelloTuner.sample(pitched[0]);
+    if (!baseRes.micOn || baseRes.state === 'silent' || !baseRes.detectedFreq) {
+      return baseRes;
+    }
+
+    let bestNote = pitched[0];
+    let bestAbsCents = Infinity;
+    for (const n of pitched) {
+      const c = Math.abs(1200 * Math.log2(baseRes.detectedFreq / n.frequency));
+      if (c < bestAbsCents) {
+        bestAbsCents = c;
+        bestNote = n;
+      }
+    }
+    return CelloTuner.sample(bestNote);
+  }
+
+  /**
    * Main animation loop
    */
   function tick(timestamp) {
-    if (isPlaying && currentPart) {
+    if (isPlaying && currentScore && currentLines.length > 0) {
       if (lastFrameTime === null) lastFrameTime = timestamp;
       const dtSec = Math.min(0.1, (timestamp - lastFrameTime) / 1000);
       lastFrameTime = timestamp;
 
+      const prevBeat = currentBeat;
       const beatsPerSec = getEffectiveBpm() / 60;
       currentBeat += dtSec * beatsPerSec;
+
+      // Trigger Tone.js cello audio for any lines with Sound enabled
+      if (lineSoundEnabled.some(Boolean)) {
+        triggerAudioInRange(prevBeat, currentBeat, needsInitialAudioTrigger);
+        needsInitialAudioTrigger = false;
+      } else {
+        needsInitialAudioTrigger = false;
+      }
 
       // Optional metronome click on integer beat crossings
       if (toggleMetronomeEl.checked) {
@@ -268,32 +463,167 @@
         }
       }
 
-      if (currentBeat >= currentPart.totalBeats) {
-        currentBeat = currentPart.totalBeats;
+      if (currentBeat >= currentScore.totalBeats) {
+        currentBeat = currentScore.totalBeats;
         setPlaying(false);
       }
 
       syncProgressUI();
     }
 
-    const activeNote = findActiveNote(currentBeat);
-    const tunerResult = CelloTuner.sample(activeNote);
+    const activeNotesByLine = currentLines.map((line) => findActiveNotesForLine(line, currentBeat));
+    const safeTunerIdx = Math.min(tunerLineIndex, Math.max(0, currentLines.length - 1));
+    const tunerActiveNotes = activeNotesByLine[safeTunerIdx] || [];
+    const tunerResult = evaluateTunerForNotes(tunerActiveNotes);
 
-    // Record intonation state onto the note while it crosses the evaluation line
-    if (activeNote && !activeNote.isRest && tunerResult.micOn && tunerResult.state !== 'silent') {
-      // Upgrade to 'intune' if the player locks in on the note, otherwise keep latest reading
-      if (activeNote.evalState !== 'intune' || tunerResult.state === 'intune') {
-        activeNote.evalState = tunerResult.state;
+    // Record intonation state onto the tuner-checked line's active notes
+    if (tunerResult.micOn && tunerResult.state !== 'silent') {
+      for (const n of tunerActiveNotes) {
+        if (!n.isRest) {
+          if (n.evalState !== 'intune' || tunerResult.state === 'intune') {
+            n.evalState = tunerResult.state;
+          }
+        }
       }
     }
 
-    updateTunerUI(activeNote, tunerResult);
-    staff.render(currentBeat, activeNote, tunerResult);
+    updateTunerUI(tunerActiveNotes, tunerResult);
+    staff.render(currentBeat, activeNotesByLine, tunerResult);
 
     requestAnimationFrame(tick);
   }
 
   // ---------- Event Listeners ----------
+
+  // Pre-warm audio context on first click
+  document.body.addEventListener('click', () => {
+    CelloAudio.init();
+  }, { once: true });
+
+  // Local Browser FIFO Cache (up to 10 recently uploaded MusicXML files per user)
+  const RECENT_STORAGE_KEY = 'celloPlayAlong.recentFiles.v1';
+  const LAST_SELECTED_KEY = 'celloPlayAlong.lastSelectedId.v1';
+  const MAX_RECENT_FILES = 10;
+
+  function readRecentCache() {
+    try {
+      const raw = localStorage.getItem(RECENT_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function writeRecentCache(entries) {
+    const list = entries.slice(0, MAX_RECENT_FILES);
+    while (list.length > 0) {
+      try {
+        localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(list));
+        return list;
+      } catch (_) {
+        // Storage quota exceeded: evict oldest entry (FIFO) and retry
+        list.pop();
+      }
+    }
+    return [];
+  }
+
+  function saveUploadedScoreToCache(score) {
+    if (!score || !score.rawXml) return null;
+    const fileName = score.fileName || `${score.title || 'Untitled'}.xml`;
+    const title = score.title || fileName;
+    const entry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      fileName,
+      title,
+      xml: score.rawXml,
+      uploadedAt: Date.now(),
+    };
+
+    // Remove existing entry with the same filename so re-uploads refresh its slot without duplicating
+    const existing = readRecentCache().filter((item) => item.fileName !== fileName);
+    existing.unshift(entry); // Newest at top; oldest evicted at index >= MAX_RECENT_FILES (FIFO)
+    const saved = writeRecentCache(existing);
+    const activeId = saved.some((item) => item.id === entry.id) ? entry.id : (saved[0]?.id || '');
+    try {
+      if (activeId) localStorage.setItem(LAST_SELECTED_KEY, activeId);
+    } catch (_) {}
+    renderRecentDropdown(activeId);
+    return activeId;
+  }
+
+  function renderRecentDropdown(selectedId = '') {
+    const entries = readRecentCache();
+    recentSelectEl.innerHTML = '';
+
+    if (entries.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No saved files yet';
+      recentSelectEl.appendChild(opt);
+      recentSelectEl.disabled = true;
+      return;
+    }
+
+    recentSelectEl.disabled = false;
+    entries.forEach((item) => {
+      const opt = document.createElement('option');
+      opt.value = item.id;
+      const baseName = item.fileName.replace(/\.(musicxml|xml|mxl)$/i, '');
+      opt.textContent = item.title && item.title !== baseName && item.title !== item.fileName
+        ? `${item.title} (${item.fileName})`
+        : item.fileName;
+      recentSelectEl.appendChild(opt);
+    });
+
+    if (selectedId && entries.some((item) => item.id === selectedId)) {
+      recentSelectEl.value = selectedId;
+    } else {
+      recentSelectEl.value = entries[0].id;
+    }
+  }
+
+  function loadCachedEntryById(id) {
+    const entries = readRecentCache();
+    const entry = entries.find((item) => item.id === id) || entries[0];
+    if (!entry) {
+      showEmptyState();
+      return false;
+    }
+    try {
+      const fallbackTitle = entry.fileName.replace(/\.(musicxml|xml|mxl)$/i, '');
+      const score = MusicXMLParser.parseXmlString(entry.xml, fallbackTitle, entry.fileName);
+      loadScore(score);
+      try { localStorage.setItem(LAST_SELECTED_KEY, entry.id); } catch (_) {}
+      renderRecentDropdown(entry.id);
+      return true;
+    } catch (err) {
+      console.error('Failed to parse cached MusicXML entry:', err);
+      return false;
+    }
+  }
+
+  function showEmptyState() {
+    currentScore = null;
+    currentLines = [];
+    musicTitleEl.textContent = 'Upload a MusicXML File';
+    musicFilenameEl.textContent = '';
+    musicFilenameEl.classList.add('hidden');
+    musicSubtitleEl.textContent = 'Browse or drag & drop a .xml, .musicxml, or .mxl file (last 10 saved locally)';
+    staffStageEl.classList.remove('two-line');
+    staff.setLines([]);
+    staff.resize();
+    lineControlsRailEl.innerHTML = `
+      <div class="line-control-card">
+        <div class="line-card-title"><span>No Score</span></div>
+        <p style="font-size:0.78rem;color:var(--text-muted);line-height:1.4;">Upload a MusicXML file to see Line 1 &amp; Line 2 controls.</p>
+      </div>
+    `;
+    renderRecentDropdown('');
+    resetPlayback();
+  }
 
   // Browse MusicXML file
   browseBtn.addEventListener('click', () => fileInputEl.click());
@@ -304,6 +634,7 @@
     try {
       const score = await MusicXMLParser.parseFile(file);
       loadScore(score);
+      saveUploadedScoreToCache(score);
     } catch (err) {
       alert(err.message || 'Failed to load MusicXML file.');
     } finally {
@@ -324,19 +655,17 @@
     try {
       const score = await MusicXMLParser.parseFile(file);
       loadScore(score);
+      saveUploadedScoreToCache(score);
     } catch (err) {
       alert(err.message || 'Failed to parse dropped MusicXML file.');
     }
   });
 
-  // Sample switcher
-  sampleSelectEl.addEventListener('change', () => {
-    loadBuiltInSample(sampleSelectEl.value);
-  });
-
-  // Multi-part switcher
-  partSelectEl.addEventListener('change', () => {
-    selectPart(parseInt(partSelectEl.value, 10));
+  // Recent cached files dropdown switcher
+  recentSelectEl.addEventListener('change', () => {
+    if (recentSelectEl.value) {
+      loadCachedEntryById(recentSelectEl.value);
+    }
   });
 
   // Mic / Tuner button
@@ -362,9 +691,12 @@
   });
 
   // Play / Pause & Restart
-  playBtn.addEventListener('click', () => {
-    if (!currentPart) return;
-    if (currentBeat >= currentPart.totalBeats) {
+  playBtn.addEventListener('click', async () => {
+    if (!currentScore || currentLines.length === 0) return;
+    if (!isPlaying && lineSoundEnabled.some(Boolean)) {
+      await CelloAudio.ensureStarted();
+    }
+    if (currentBeat >= currentScore.totalBeats) {
       currentBeat = 0;
       clearNoteEvaluations();
     }
@@ -389,10 +721,12 @@
 
   // Progress slider scrubbing
   progressSliderEl.addEventListener('input', () => {
-    if (!currentPart) return;
+    if (!currentScore) return;
     const pct = parseFloat(progressSliderEl.value) || 0;
-    currentBeat = (pct / 100) * currentPart.totalBeats;
+    currentBeat = (pct / 100) * currentScore.totalBeats;
     lastMetronomeBeat = Math.floor(currentBeat);
+    needsInitialAudioTrigger = true;
+    CelloAudio.stopAll();
     syncProgressUI();
   });
 
@@ -407,19 +741,21 @@
   let dragStartBeat = 0;
 
   staffContainerEl.addEventListener('pointerdown', (e) => {
-    if (!currentPart) return;
+    if (!currentScore) return;
     isDraggingStaff = true;
     dragStartX = e.clientX;
     dragStartBeat = currentBeat;
+    CelloAudio.stopAll();
     staffContainerEl.setPointerCapture(e.pointerId);
   });
 
   staffContainerEl.addEventListener('pointermove', (e) => {
-    if (!isDraggingStaff || !currentPart) return;
+    if (!isDraggingStaff || !currentScore) return;
     const dx = e.clientX - dragStartX;
     const deltaBeats = -dx / staff.PIXELS_PER_BEAT;
-    currentBeat = Math.max(0, Math.min(currentPart.totalBeats, dragStartBeat + deltaBeats));
+    currentBeat = Math.max(0, Math.min(currentScore.totalBeats, dragStartBeat + deltaBeats));
     lastMetronomeBeat = Math.floor(currentBeat);
+    needsInitialAudioTrigger = true;
     syncProgressUI();
   });
 
@@ -444,16 +780,15 @@
   // Responsive canvas resize
   window.addEventListener('resize', () => staff.resize());
 
-  // Load built-in sample
-  function loadBuiltInSample(key) {
-    const xml = key === 'scale'
-      ? MusicXMLParser.getSampleScaleXml()
-      : MusicXMLParser.getSampleBachXml();
-    const score = MusicXMLParser.parseXmlString(xml);
-    loadScore(score);
+  // Initialize from local browser cache (if any), otherwise show clean upload state
+  CelloAudio.init();
+  const cachedEntries = readRecentCache();
+  if (cachedEntries.length > 0) {
+    let lastId = '';
+    try { lastId = localStorage.getItem(LAST_SELECTED_KEY) || ''; } catch (_) {}
+    loadCachedEntryById(lastId || cachedEntries[0].id);
+  } else {
+    showEmptyState();
   }
-
-  // Initialize!
-  loadBuiltInSample('bach');
   requestAnimationFrame(tick);
 })();

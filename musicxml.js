@@ -1,7 +1,8 @@
 /**
  * musicxml.js
- * Parses .xml, .musicxml, and compressed .mxl files into a clean timeline of notes & measures
- * tailored for scrolling staff playback and real-time cello intonation evaluation.
+ * Parses .xml, .musicxml, and compressed .mxl files into structured lines (1-line solo or 2-line duets)
+ * supporting both single-part multi-staff (<staves>2</staves>, e.g., Soundslice Piatti exports)
+ * and multi-part (<part id="P1">, <part id="P2">) MusicXML scores.
  */
 
 const MusicXMLParser = (() => {
@@ -43,6 +44,7 @@ const MusicXMLParser = (() => {
   }
 
   function clefLabel(clef) {
+    if (!clef) return 'Bass Clef';
     if (clef.sign === 'F' && clef.line === 4) return 'Bass Clef';
     if (clef.sign === 'C' && clef.line === 4) return 'Tenor Clef';
     if (clef.sign === 'C' && clef.line === 3) return 'Alto Clef';
@@ -144,13 +146,15 @@ const MusicXMLParser = (() => {
       xmlText = await file.text();
     }
     const fallbackTitle = file.name.replace(/\.(musicxml|xml|mxl)$/i, '');
-    return parseXmlString(xmlText, fallbackTitle);
+    const score = parseXmlString(xmlText, fallbackTitle, file.name);
+    score.rawXml = xmlText;
+    return score;
   }
 
   /**
-   * Parse raw MusicXML text into a structured score object.
+   * Parse raw MusicXML text into a structured score object with 1 or 2 (or more) lines.
    */
-  function parseXmlString(xmlText, fallbackTitle = 'Untitled Score') {
+  function parseXmlString(xmlText, fallbackTitle = 'Untitled Score', fileName = null) {
     const doc = new DOMParser().parseFromString(xmlText, 'application/xml');
     const parseErr = doc.querySelector('parsererror');
     if (parseErr) {
@@ -177,38 +181,97 @@ const MusicXMLParser = (() => {
       throw new Error('No <part> elements found. Only score-partwise MusicXML files are supported.');
     }
 
-    const parts = partEls.map((partEl, idx) => {
+    // Extract all lines across all parts (expanding multi-staff parts like <staves>2</staves>)
+    const allLines = [];
+    partEls.forEach((partEl, idx) => {
       const id = partEl.getAttribute('id') || `P${idx + 1}`;
       const name = partNameMap.get(id) || `Part ${idx + 1}`;
-      return parsePart(partEl, id, name, title);
+      const partLines = parsePartIntoLines(partEl, id, name, title);
+      allLines.push(...partLines);
     });
 
-    // Prefer a Cello / Violoncello part if present
-    let defaultPartIndex = parts.findIndex((p) => /cello|violoncello|vc\b/i.test(p.partName));
-    if (defaultPartIndex === -1) defaultPartIndex = 0;
+    // Pick up to 2 primary lines to display (preferring Cello lines if >2 exist)
+    let displayLines = allLines;
+    if (allLines.length > 2) {
+      const celloLines = allLines.filter((l) => /cello|violoncello|vc\b/i.test(l.partName));
+      displayLines = celloLines.length >= 2 ? celloLines.slice(0, 2) : allLines.slice(0, 2);
+    }
+
+    // Assign clean short labels for UI
+    displayLines.forEach((line, idx) => {
+      line.lineIndex = idx;
+      if (displayLines.length === 1) {
+        line.displayLabel = line.shortLabel || 'Line 1';
+      } else {
+        line.displayLabel = line.shortLabel || `Line ${idx + 1}`;
+      }
+    });
+
+    const totalBeats = displayLines.reduce((max, l) => Math.max(max, l.totalBeats), 0);
+    const initialTempo = displayLines[0]?.initialTempo || 72;
+    const primary = displayLines[0];
+    const lineCountLabel = displayLines.length === 2 ? 'Duet (2 Lines)' : 'Solo (1 Line)';
+    const subtitle = primary
+      ? `${lineCountLabel} · ${primary.subtitle}`
+      : lineCountLabel;
 
     return {
       title,
-      parts,
-      defaultPartIndex,
+      fileName,
+      lines: displayLines,
+      allLines,
+      totalBeats,
+      initialTempo,
+      subtitle,
     };
   }
 
-  function parsePart(partEl, partId, partName, title) {
+  /**
+   * Parses a single <part> element into 1 or more line objects (one per staff if <staves> > 1).
+   */
+  function parsePartIntoLines(partEl, partId, partName, title) {
     const measureEls = Array.from(partEl.querySelectorAll(':scope > measure'));
+
+    // Detect how many staves this part uses
+    let staffCount = 1;
+    const stavesEl = partEl.querySelector('attributes > staves');
+    if (stavesEl) {
+      staffCount = Math.max(1, parseInt(stavesEl.textContent, 10) || 1);
+    }
+    if (staffCount === 1) {
+      const hasStaff2 = Boolean(partEl.querySelector('note > staff'));
+      if (hasStaff2) {
+        for (const sEl of partEl.querySelectorAll('note > staff')) {
+          const n = parseInt(sEl.textContent, 10);
+          if (n > staffCount) staffCount = n;
+        }
+      }
+    }
+    // Cap at 2 staves per part for duet rendering
+    staffCount = Math.min(2, staffCount);
+
     let divisions = 1;
     let fifths = 0;
     let timeSig = { beats: 4, beatType: 4 };
-    let clef = { sign: 'F', line: 4 }; // Default bass clef for cello
+    const clefByStaff = {};
+    for (let s = 1; s <= staffCount; s++) {
+      clefByStaff[String(s)] = { sign: 'F', line: 4 }; // Default bass clef for cello
+    }
+
     let initialTempo = 72;
     let foundTempo = false;
 
-    const notes = [];
-    const measures = [];
-    let currentMeasureStartBeat = 0;
+    const notesByStaff = {};
+    const measuresByStaff = {};
+    const activeTiesByStaff = {};
+    for (let s = 1; s <= staffCount; s++) {
+      const key = String(s);
+      notesByStaff[key] = [];
+      measuresByStaff[key] = [];
+      activeTiesByStaff[key] = new Map();
+    }
 
-    // Track ongoing tied notes by MIDI pitch
-    const activeTies = new Map();
+    let currentMeasureStartBeat = 0;
 
     measureEls.forEach((mEl, mIdx) => {
       const mNum = mEl.getAttribute('number') || String(mIdx + 1);
@@ -216,15 +279,25 @@ const MusicXMLParser = (() => {
       let lastNoteStartDiv = 0;
       let maxDivInMeasure = 0;
 
-      // Active accidentals for this measure (keyed by `${step}${octave}`)
       const keyAccMap = keySignatureMap(fifths);
-      const measureAccState = new Map();
+      const measureAccStateByStaff = {};
+      const measureClefByStaff = {};
+      const primaryVoiceByStaff = {};
+      const rawRestsByStaff = {};
+      const pitchedIntervalsByStaff = {};
 
-      let measureClef = { ...clef };
+      for (let s = 1; s <= staffCount; s++) {
+        const key = String(s);
+        measureAccStateByStaff[key] = new Map();
+        measureClefByStaff[key] = { ...clefByStaff[key] };
+        primaryVoiceByStaff[key] = null;
+        rawRestsByStaff[key] = [];
+        pitchedIntervalsByStaff[key] = [];
+      }
+
       let measureFifths = fifths;
       let measureTimeSig = { ...timeSig };
 
-      // Check children in document order
       const children = Array.from(mEl.children);
       for (const child of children) {
         const tag = child.tagName;
@@ -250,12 +323,16 @@ const MusicXMLParser = (() => {
             measureTimeSig = { ...timeSig };
           }
 
-          const clefEl = child.querySelector('clef');
-          if (clefEl) {
+          const clefEls = Array.from(child.querySelectorAll('clef'));
+          for (const clefEl of clefEls) {
+            const cNum = clefEl.getAttribute('number') || '1';
             const sign = clefEl.querySelector('sign')?.textContent?.trim() || 'F';
-            const line = parseInt(clefEl.querySelector('line')?.textContent, 10) || (sign === 'F' ? 4 : sign === 'G' ? 2 : 4);
-            clef = { sign, line };
-            measureClef = { ...clef };
+            const line = parseInt(clefEl.querySelector('line')?.textContent, 10) ||
+              (sign === 'F' ? 4 : sign === 'G' ? 2 : 4);
+            if (clefByStaff[cNum]) {
+              clefByStaff[cNum] = { sign, line };
+              measureClefByStaff[cNum] = { sign, line };
+            }
           }
         } else if (tag === 'direction') {
           const soundEl = child.querySelector('sound[tempo]');
@@ -304,8 +381,11 @@ const MusicXMLParser = (() => {
             if (cursorDiv > maxDivInMeasure) maxDivInMeasure = cursorDiv;
           }
 
-          // Focus on primary staff (staff 1) and primary voice if multi-voice
-          if (staffNum !== '1') continue;
+          if (!notesByStaff[staffNum]) continue;
+
+          if (!primaryVoiceByStaff[staffNum]) {
+            primaryVoiceByStaff[staffNum] = voice;
+          }
 
           const startBeat = currentMeasureStartBeat + noteStartDiv / divisions;
           const durationBeats = durDiv / divisions;
@@ -313,23 +393,21 @@ const MusicXMLParser = (() => {
 
           const type = child.querySelector('type')?.textContent?.trim() || guessNoteType(durationBeats);
           const dots = child.querySelectorAll('dot').length;
+          const staffClef = clefByStaff[staffNum];
 
           if (isRest) {
-            // Only keep rests from voice 1 to avoid clutter
-            if (voice === '1') {
-              notes.push({
-                id: notes.length,
-                isRest: true,
-                startBeat,
-                durationBeats,
-                endBeat: startBeat + durationBeats,
-                type,
-                dots,
-                measureNumber: mNum,
-                clef: { ...clef },
-                evalState: null,
-              });
-            }
+            rawRestsByStaff[staffNum].push({
+              isRest: true,
+              startBeat,
+              durationBeats,
+              endBeat: startBeat + durationBeats,
+              type,
+              dots,
+              voice,
+              measureNumber: mNum,
+              clef: { ...staffClef },
+              evalState: null,
+            });
             continue;
           }
 
@@ -346,20 +424,19 @@ const MusicXMLParser = (() => {
           const diatonic = octave * 7 + STEP_TO_DIATONIC[step];
           const noteName = formatNoteName(step, alter, octave);
 
-          // Determine displayed accidental
+          // Determine displayed accidental per staff
+          const accState = measureAccStateByStaff[staffNum];
           const pitchKey = `${step}${octave}`;
-          const prevAlter = measureAccState.has(pitchKey)
-            ? measureAccState.get(pitchKey)
-            : keyAccMap[step];
+          const prevAlter = accState.has(pitchKey) ? accState.get(pitchKey) : keyAccMap[step];
 
           let displayAccidental = null;
           const explicitAcc = child.querySelector('accidental')?.textContent?.trim();
           if (explicitAcc) {
             displayAccidental = mapExplicitAccidental(explicitAcc);
-            measureAccState.set(pitchKey, alter);
+            accState.set(pitchKey, alter);
           } else if (alter !== prevAlter) {
             displayAccidental = alterToAccidentalSymbol(alter);
-            measureAccState.set(pitchKey, alter);
+            accState.set(pitchKey, alter);
           }
 
           // Check ties
@@ -367,9 +444,13 @@ const MusicXMLParser = (() => {
           const hasTieStart = tieEls.some((t) => t.getAttribute('type') === 'start');
           const hasTieStop = tieEls.some((t) => t.getAttribute('type') === 'stop');
 
+          const staffNotes = notesByStaff[staffNum];
+          const activeTies = activeTiesByStaff[staffNum];
+
           const noteObj = {
-            id: notes.length,
+            id: staffNotes.length,
             isRest: false,
+            isChord,
             step,
             alter,
             octave,
@@ -380,27 +461,48 @@ const MusicXMLParser = (() => {
             displayAccidental,
             startBeat,
             durationBeats,
+            tiedDurationBeats: durationBeats,
             endBeat: startBeat + durationBeats,
             type,
             dots,
             voice,
             measureNumber: mNum,
-            clef: { ...clef },
+            clef: { ...staffClef },
             tieFromPrev: hasTieStop,
             tieToNext: hasTieStart,
             evalState: null, // 'intune' | 'flat' | 'sharp' | 'off'
           };
 
           if (hasTieStop && activeTies.has(midi)) {
-            const prevNote = activeTies.get(midi);
-            noteObj.tiedRootId = prevNote.tiedRootId ?? prevNote.id;
-            activeTies.delete(midi);
-          }
-          if (hasTieStart) {
+            const rootNote = activeTies.get(midi);
+            noteObj.tiedRootId = rootNote.id;
+            rootNote.tiedDurationBeats += durationBeats;
+            if (!hasTieStart) {
+              activeTies.delete(midi);
+            }
+          } else if (hasTieStart) {
             activeTies.set(midi, noteObj);
           }
 
-          notes.push(noteObj);
+          staffNotes.push(noteObj);
+          pitchedIntervalsByStaff[staffNum].push({ start: startBeat, end: startBeat + durationBeats });
+        }
+      }
+
+      // Add non-overlapping rests for each staff (avoid clutter when secondary voice has filler rests)
+      for (let s = 1; s <= staffCount; s++) {
+        const key = String(s);
+        const primaryV = primaryVoiceByStaff[key];
+        const pitched = pitchedIntervalsByStaff[key];
+        const staffNotes = notesByStaff[key];
+
+        for (const r of rawRestsByStaff[key]) {
+          const isPrimaryVoice = r.voice === primaryV;
+          const overlapsPitched = pitched.some((p) => p.start < r.endBeat - 0.01 && p.end > r.startBeat + 0.01);
+          if (isPrimaryVoice || !overlapsPitched) {
+            r.id = staffNotes.length;
+            staffNotes.push(r);
+          }
         }
       }
 
@@ -408,41 +510,65 @@ const MusicXMLParser = (() => {
       const nominalMeasureBeats = measureTimeSig.beats * (4 / measureTimeSig.beatType);
       const actualMeasureBeats = maxDivInMeasure > 0 ? maxDivInMeasure / divisions : nominalMeasureBeats;
 
-      measures.push({
-        number: mNum,
-        startBeat: currentMeasureStartBeat,
-        durationBeats: actualMeasureBeats,
-        endBeat: currentMeasureStartBeat + actualMeasureBeats,
-        clef: measureClef,
-        fifths: measureFifths,
-        timeSig: measureTimeSig,
-      });
+      for (let s = 1; s <= staffCount; s++) {
+        const key = String(s);
+        measuresByStaff[key].push({
+          number: mNum,
+          startBeat: currentMeasureStartBeat,
+          durationBeats: actualMeasureBeats,
+          endBeat: currentMeasureStartBeat + actualMeasureBeats,
+          clef: measureClefByStaff[key],
+          fifths: measureFifths,
+          timeSig: measureTimeSig,
+        });
+      }
 
       currentMeasureStartBeat += actualMeasureBeats;
     });
 
-    // Sort notes by startBeat (keeping rests and pitches ordered)
-    notes.sort((a, b) => a.startBeat - b.startBeat || (a.isRest ? 1 : 0) - (b.isRest ? 1 : 0));
+    // Build line objects
+    const lines = [];
+    for (let s = 1; s <= staffCount; s++) {
+      const key = String(s);
+      const staffNotes = notesByStaff[key];
+      const staffMeasures = measuresByStaff[key];
 
-    const firstMeasure = measures[0] || {
-      clef: { sign: 'F', line: 4 },
-      fifths: 0,
-      timeSig: { beats: 4, beatType: 4 },
-    };
+      // Sort notes by startBeat, pitched before rests, lower pitch before higher in chords
+      staffNotes.sort((a, b) =>
+        a.startBeat - b.startBeat ||
+        (a.isRest ? 1 : 0) - (b.isRest ? 1 : 0) ||
+        (a.midi || 0) - (b.midi || 0)
+      );
+      // Re-index ids cleanly
+      staffNotes.forEach((n, i) => { n.id = i; });
 
-    return {
-      title,
-      partId,
-      partName,
-      initialTempo,
-      totalBeats: currentMeasureStartBeat,
-      measures,
-      notes,
-      clef: firstMeasure.clef,
-      fifths: firstMeasure.fifths,
-      timeSig: firstMeasure.timeSig,
-      subtitle: `${clefLabel(firstMeasure.clef)} · ${KEY_NAMES_MAJOR[String(firstMeasure.fifths)] || 'Key'} · ${firstMeasure.timeSig.beats}/${firstMeasure.timeSig.beatType}`,
-    };
+      const firstMeasure = staffMeasures[0] || {
+        clef: { sign: 'F', line: 4 },
+        fifths: 0,
+        timeSig: { beats: 4, beatType: 4 },
+      };
+
+      const shortLabel = staffCount > 1
+        ? `Line ${s}`
+        : partName;
+
+      lines.push({
+        title,
+        partId: staffCount > 1 ? `${partId}-S${s}` : partId,
+        partName: staffCount > 1 ? `${partName} — Line ${s}` : partName,
+        shortLabel,
+        initialTempo,
+        totalBeats: currentMeasureStartBeat,
+        measures: staffMeasures,
+        notes: staffNotes,
+        clef: firstMeasure.clef,
+        fifths: firstMeasure.fifths,
+        timeSig: firstMeasure.timeSig,
+        subtitle: `${clefLabel(firstMeasure.clef)} · ${KEY_NAMES_MAJOR[String(firstMeasure.fifths)] || 'Key'} · ${firstMeasure.timeSig.beats}/${firstMeasure.timeSig.beatType}`,
+      });
+    }
+
+    return lines;
   }
 
   function guessNoteType(beats) {
@@ -473,103 +599,9 @@ const MusicXMLParser = (() => {
     return null;
   }
 
-  /**
-   * Built-in Sample 1: Bach Cello Suite No. 1 in G Major, BWV 1007 - Prelude (Opening 8 measures)
-   */
-  function getSampleBachXml() {
-    const m = (num, attrs, notesXml) => `<measure number="${num}">${attrs}${notesXml}</measure>`;
-    const n = (step, octave, dur = 1, type = '16th', alter = 0) => `
-      <note>
-        <pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ''}<octave>${octave}</octave></pitch>
-        <duration>${dur}</duration><voice>1</voice><type>${type}</type>
-      </note>`;
-
-    const attrs1 = `
-      <attributes>
-        <divisions>4</divisions>
-        <key><fifths>1</fifths></key>
-        <time><beats>4</beats><beat-type>4</beat-type></time>
-        <clef><sign>F</sign><line>4</line></clef>
-      </attributes>
-      <direction><sound tempo="66"/></direction>`;
-
-    // Measure 1: G2 D3 B3 A3 B3 D3 B3 D3 (x2)
-    const m1Half = n('G',2) + n('D',3) + n('B',3) + n('A',3) + n('B',3) + n('D',3) + n('B',3) + n('D',3);
-    // Measure 2: G2 E3 C4 B3 C4 E3 C4 E3 (x2)
-    const m2Half = n('G',2) + n('E',3) + n('C',4) + n('B',3) + n('C',4) + n('E',3) + n('C',4) + n('E',3);
-    // Measure 3: G2 F#3 C4 B3 C4 F#3 C4 F#3 (x2)
-    const m3Half = n('G',2) + n('F',3,1,'16th',1) + n('C',4) + n('B',3) + n('C',4) + n('F',3,1,'16th',1) + n('C',4) + n('F',3,1,'16th',1);
-    // Measure 4: G2 G3 B3 A3 B3 G3 B3 G3 (x2)
-    const m4Half = n('G',2) + n('G',3) + n('B',3) + n('A',3) + n('B',3) + n('G',3) + n('B',3) + n('G',3);
-    // Measure 5: G2 E3 B3 A3 B3 G3 F#3 G3 | E3 G3 F#3 G3 B2 D3 C#3 B2
-    const m5 = n('G',2) + n('E',3) + n('B',3) + n('A',3) + n('B',3) + n('G',3) + n('F',3,1,'16th',1) + n('G',3)
-             + n('E',3) + n('G',3) + n('F',3,1,'16th',1) + n('G',3) + n('B',2) + n('D',3) + n('C',3,1,'16th',1) + n('B',2);
-    // Measure 6: C#3 G3 A3 G3 A3 G3 A3 G3 (x2)
-    const m6Half = n('C',3,1,'16th',1) + n('G',3) + n('A',3) + n('G',3) + n('A',3) + n('G',3) + n('A',3) + n('G',3);
-    // Measure 7: F#3 A3 D4 C#4 D4 A3 G3 A3 | F#3 A3 G3 A3 D3 F#3 E3 D3
-    const m7 = n('F',3,1,'16th',1) + n('A',3) + n('D',4) + n('C',4,1,'16th',1) + n('D',4) + n('A',3) + n('G',3) + n('A',3)
-             + n('F',3,1,'16th',1) + n('A',3) + n('G',3) + n('A',3) + n('D',3) + n('F',3,1,'16th',1) + n('E',3) + n('D',3);
-    // Measure 8: G2 (whole note resolution for practice)
-    const m8 = n('G',2,16,'whole');
-
-    return `<?xml version="1.0" encoding="UTF-8"?>
-      <score-partwise version="3.1">
-        <work><work-title>Cello Suite No. 1 in G Major — Prelude (Excerpt)</work-title></work>
-        <part-list><score-part id="P1"><part-name>Violoncello</part-name></score-part></part-list>
-        <part id="P1">
-          ${m(1, attrs1, m1Half + m1Half)}
-          ${m(2, '', m2Half + m2Half)}
-          ${m(3, '', m3Half + m3Half)}
-          ${m(4, '', m4Half + m4Half)}
-          ${m(5, '', m5)}
-          ${m(6, '', m6Half + m6Half)}
-          ${m(7, '', m7)}
-          ${m(8, '', m8)}
-        </part>
-      </score-partwise>`;
-  }
-
-  /**
-   * Built-in Sample 2: Cello G Major Warmup Scale (Slow, sustained notes for easy intonation practice)
-   */
-  function getSampleScaleXml() {
-    const n = (step, octave, dur = 2, type = 'half', alter = 0) => `
-      <note>
-        <pitch><step>${step}</step>${alter ? `<alter>${alter}</alter>` : ''}<octave>${octave}</octave></pitch>
-        <duration>${dur}</duration><voice>1</voice><type>${type}</type>
-      </note>`;
-
-    return `<?xml version="1.0" encoding="UTF-8"?>
-      <score-partwise version="3.1">
-        <work><work-title>Cello G Major Intonation Warmup</work-title></work>
-        <part-list><score-part id="P1"><part-name>Violoncello</part-name></score-part></part-list>
-        <part id="P1">
-          <measure number="1">
-            <attributes>
-              <divisions>1</divisions>
-              <key><fifths>1</fifths></key>
-              <time><beats>4</beats><beat-type>4</beat-type></time>
-              <clef><sign>F</sign><line>4</line></clef>
-            </attributes>
-            <direction><sound tempo="60"/></direction>
-            ${n('G',2,2,'half')}${n('A',2,2,'half')}
-          </measure>
-          <measure number="2">${n('B',2,2,'half')}${n('C',3,2,'half')}</measure>
-          <measure number="3">${n('D',3,2,'half')}${n('E',3,2,'half')}</measure>
-          <measure number="4">${n('F',3,2,'half',1)}${n('G',3,2,'half')}</measure>
-          <measure number="5">${n('G',3,2,'half')}${n('F',3,2,'half',1)}</measure>
-          <measure number="6">${n('E',3,2,'half')}${n('D',3,2,'half')}</measure>
-          <measure number="7">${n('C',3,2,'half')}${n('B',2,2,'half')}</measure>
-          <measure number="8">${n('A',2,2,'half')}${n('G',2,2,'half')}</measure>
-        </part>
-      </score-partwise>`;
-  }
-
   return {
     parseFile,
     parseXmlString,
-    getSampleBachXml,
-    getSampleScaleXml,
     clefLabel,
   };
 })();

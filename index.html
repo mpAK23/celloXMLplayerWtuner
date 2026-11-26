@@ -5,23 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cello Play-Along &amp; Tuner</title>
   <link rel="stylesheet" href="styles.css" />
+  <!-- Tone.js for real sampled cello playback (same library as learncellonotes) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
 </head>
 <body>
   <div class="app-shell">
-    <!-- Top Header: Music Title & File Upload -->
+    <!-- Top Header: Music Title / Filename & File Upload -->
     <header class="top-bar">
       <div class="title-block">
-        <span class="app-badge">Cello Play-Along</span>
-        <h1 id="music-title" class="music-title">Cello Suite No. 1 — Prelude (Sample)</h1>
-        <p id="music-subtitle" class="music-subtitle">Bass Clef · G Major · 4/4</p>
+        <div class="title-meta-row">
+          <span class="app-badge">Cello Play-Along</span>
+          <span id="music-filename" class="filename-badge hidden"></span>
+        </div>
+        <h1 id="music-title" class="music-title">Upload a MusicXML File</h1>
+        <p id="music-subtitle" class="music-subtitle">Browse or drag &amp; drop a .xml, .musicxml, or .mxl file (last 10 saved locally)</p>
       </div>
 
       <div class="file-actions">
-        <select id="part-select" class="part-select hidden" aria-label="Select instrument part"></select>
-
-        <select id="sample-select" class="sample-select" aria-label="Load built-in sample">
-          <option value="bach">Sample: Bach Prelude</option>
-          <option value="scale">Sample: Cello G Major Scale</option>
+        <select id="recent-select" class="sample-select" aria-label="Select recently uploaded MusicXML file" disabled>
+          <option value="">No saved files yet</option>
         </select>
 
         <input
@@ -50,7 +52,7 @@
         </button>
         <div class="note-readouts">
           <div class="readout-box">
-            <span class="readout-label">Target</span>
+            <span class="readout-label" id="target-note-label">Target (Line 1)</span>
             <span id="target-note" class="readout-value target-val">—</span>
           </div>
           <div class="readout-box">
@@ -110,10 +112,13 @@
       </div>
     </section>
 
-    <!-- Scrolling Staff Panel -->
+    <!-- Scrolling Staff Panel (1 or 2 Lines + Per-Line Sound & Tuner Ticks) -->
     <main class="staff-section">
       <div class="staff-header-strip">
-        <span id="measure-indicator" class="measure-indicator">Measure 1 / 1</span>
+        <div class="staff-header-left">
+          <span id="measure-indicator" class="measure-indicator">Measure 1 / 1</span>
+          <span id="audio-status-pill" class="audio-status-pill">Cello Sound: Ready</span>
+        </div>
         <span class="staff-hint">Drag staff left/right to scrub · Press Space to play/pause</span>
         <div class="staff-toggles">
           <label class="toggle-chip">
@@ -127,8 +132,16 @@
         </div>
       </div>
 
-      <div class="staff-canvas-container" id="staff-container">
-        <canvas id="staff-canvas" aria-label="Scrolling musical staff"></canvas>
+      <div class="staff-stage two-line" id="staff-stage">
+        <!-- Left Rail: Two ticks next to each line (Sound checkbox + Tuner accuracy radio) -->
+        <aside class="line-controls-rail" id="line-controls-rail" aria-label="Per-line sound and tuner controls">
+          <!-- Dynamically populated for 1 or 2 lines -->
+        </aside>
+
+        <!-- Scrolling Musical Staff Canvas -->
+        <div class="staff-canvas-container" id="staff-container">
+          <canvas id="staff-canvas" aria-label="Scrolling musical staff"></canvas>
+        </div>
       </div>
 
       <!-- Progress Scrubber -->
@@ -193,6 +206,7 @@
   </div>
 
   <script src="musicxml.js"></script>
+  <script src="audio.js"></script>
   <script src="tuner.js"></script>
   <script src="staff.js"></script>
   <script src="app.js"></script>

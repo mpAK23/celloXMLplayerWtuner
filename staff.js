@@ -1,8 +1,10 @@
 /**
  * staff.js
- * High-DPI HTML5 Canvas scrolling musical staff renderer with an evaluation playhead line.
+ * High-DPI HTML5 Canvas scrolling musical staff renderer supporting 1-line (solo)
+ * and 2-line (duet) synchronized scores with an evaluation playhead line.
  * Supports Bass, Tenor, Alto, and Treble clefs, key signatures, ledger lines, accidentals,
- * rests, ties, duration ribbons, and live intonation color feedback.
+ * rests, chords, ties, duration ribbons, and live intonation color feedback on the
+ * tuner-selected line.
  */
 
 class StaffRenderer {
@@ -11,16 +13,17 @@ class StaffRenderer {
     this.container = container;
     this.ctx = canvas.getContext('2d');
 
-    this.LINE_SPACING = 18;
+    this.LINE_SPACING = 15;
     this.HALF_STEP = this.LINE_SPACING / 2;
     this.PIXELS_PER_BEAT = 115;
 
     this.width = 900;
-    this.height = 310;
+    this.height = 440;
     this.dpr = window.devicePixelRatio || 1;
 
     this.showNoteLabels = true;
-    this.part = null;
+    this.lines = [];
+    this.tunerLineIndex = 0;
 
     this.resize();
   }
@@ -36,8 +39,14 @@ class StaffRenderer {
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
   }
 
-  setPart(part) {
-    this.part = part;
+  setLines(lines) {
+    this.lines = Array.isArray(lines) ? lines : [];
+    this.LINE_SPACING = this.lines.length >= 2 ? 15 : 18;
+    this.HALF_STEP = this.LINE_SPACING / 2;
+  }
+
+  setTunerLineIndex(idx) {
+    this.tunerLineIndex = idx;
   }
 
   setShowNoteLabels(show) {
@@ -46,12 +55,12 @@ class StaffRenderer {
 
   getLeftMargin(fifths) {
     const accCount = Math.min(Math.abs(fifths || 0), 7);
-    return 76 + accCount * 13 + 26;
+    return 72 + accCount * 12 + 26;
   }
 
   getPlayheadX(fifths) {
     const leftMargin = this.getLeftMargin(fifths);
-    return Math.max(leftMargin + 72, Math.round(this.width * 0.28));
+    return Math.max(leftMargin + 68, Math.round(this.width * 0.27));
   }
 
   /**
@@ -76,9 +85,36 @@ class StaffRenderer {
   }
 
   /**
-   * Main render pass for a given beat position, active note, and live tuner result.
+   * Compute vertical geometry for each staff row so rows align with the left control rail.
    */
-  render(currentBeat, activeNote, tunerResult) {
+  getRowLayouts() {
+    const count = Math.max(1, this.lines.length);
+    const staffHeight = this.LINE_SPACING * 4;
+    const rowHeight = this.height / count;
+    const layouts = [];
+    for (let i = 0; i < count; i++) {
+      const rowTop = i * rowHeight;
+      const rowBottom = rowTop + rowHeight;
+      const centerY = rowTop + rowHeight / 2;
+      const staffTopY = Math.round(centerY - staffHeight / 2);
+      const staffBottomY = staffTopY + staffHeight;
+      layouts.push({
+        index: i,
+        rowTop,
+        rowBottom,
+        rowHeight,
+        staffTopY,
+        staffBottomY,
+      });
+    }
+    return layouts;
+  }
+
+  /**
+   * Main render pass for a given beat position, active notes per line, and live tuner result.
+   * activeNotesByLine: Array<Array<Note>> (active pitched notes or rest per line)
+   */
+  render(currentBeat, activeNotesByLine, tunerResult) {
     const ctx = this.ctx;
     const w = this.width;
     const h = this.height;
@@ -88,38 +124,64 @@ class StaffRenderer {
     ctx.fillStyle = '#fbf9f3';
     ctx.fillRect(0, 0, w, h);
 
-    const staffHeight = this.LINE_SPACING * 4;
-    const staffTopY = Math.round((h - staffHeight) / 2) - 4;
-    const staffBottomY = staffTopY + staffHeight;
+    const layouts = this.getRowLayouts();
+    const lines = this.lines;
+    const primaryLine = lines[0] || null;
+    const maxFifths = lines.reduce((m, l) => Math.max(m, Math.abs(l.fifths || 0)), 0);
+    const leftMargin = this.getLeftMargin(maxFifths);
+    const playheadX = this.getPlayheadX(maxFifths);
 
-    const part = this.part;
-    const activeClef = part ? part.clef : { sign: 'F', line: 4 };
-    const fifths = part ? part.fifths : 0;
-    const leftMargin = this.getLeftMargin(fifths);
-    const playheadX = this.getPlayheadX(fifths);
+    const tunerLineIdx = Math.min(this.tunerLineIndex, Math.max(0, lines.length - 1));
+    const tunerActiveNotes = (activeNotesByLine && activeNotesByLine[tunerLineIdx]) || [];
+    const primaryTunerNote = tunerActiveNotes.find((n) => !n.isRest) || tunerActiveNotes[0] || null;
 
-    // 1. Subtle evaluation zone band behind the playhead line
-    const zoneColor = this.evalZoneColor(tunerResult, activeNote);
-    const grad = ctx.createLinearGradient(playheadX - 24, 0, playheadX + 24, 0);
-    grad.addColorStop(0, 'rgba(0,0,0,0)');
-    grad.addColorStop(0.5, zoneColor);
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(playheadX - 24, 0, 48, h);
+    // 1. Subtle row highlight behind the tuner-checked line (in 2-line mode)
+    if (lines.length >= 2 && layouts[tunerLineIdx]) {
+      const rl = layouts[tunerLineIdx];
+      ctx.fillStyle = 'rgba(217, 155, 67, 0.065)';
+      ctx.fillRect(0, rl.rowTop, w, rl.rowHeight);
 
-    // 2. Five staff lines across full width
-    ctx.strokeStyle = '#57534e';
-    ctx.lineWidth = 1.25;
-    for (let i = 0; i < 5; i++) {
-      const y = staffTopY + i * this.LINE_SPACING;
+      // Subtle divider between top and bottom row
+      ctx.strokeStyle = 'rgba(120, 113, 108, 0.16)';
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(14, y);
-      ctx.lineTo(w - 14, y);
+      ctx.moveTo(0, layouts[0].rowBottom);
+      ctx.lineTo(w, layouts[0].rowBottom);
       ctx.stroke();
     }
 
-    if (part) {
+    // 2. Evaluation zone band behind the playhead line
+    for (let i = 0; i < layouts.length; i++) {
+      const rl = layouts[i];
+      const isTunerRow = i === tunerLineIdx;
+      const zoneColor = isTunerRow
+        ? this.evalZoneColor(tunerResult, primaryTunerNote)
+        : 'rgba(100, 116, 139, 0.07)';
+      const grad = ctx.createLinearGradient(playheadX - 24, 0, playheadX + 24, 0);
+      grad.addColorStop(0, 'rgba(0,0,0,0)');
+      grad.addColorStop(0.5, zoneColor);
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(playheadX - 24, rl.rowTop, 48, rl.rowHeight);
+    }
+
+    // 3. Five staff lines per row across full width
+    ctx.strokeStyle = '#57534e';
+    ctx.lineWidth = 1.2;
+    for (const rl of layouts) {
+      for (let s = 0; s < 5; s++) {
+        const y = rl.staffTopY + s * this.LINE_SPACING;
+        ctx.beginPath();
+        ctx.moveTo(14, y);
+        ctx.lineTo(w - 14, y);
+        ctx.stroke();
+      }
+    }
+
+    if (primaryLine) {
       const beatToX = (beat) => playheadX + (beat - currentBeat) * this.PIXELS_PER_BEAT;
+      const topStaffTopY = layouts[0].staffTopY;
+      const bottomStaffBottomY = layouts[layouts.length - 1].staffBottomY;
 
       // Clip scrolling content to the right of leftMargin
       ctx.save();
@@ -127,120 +189,177 @@ class StaffRenderer {
       ctx.rect(leftMargin - 8, 0, w - (leftMargin - 8), h);
       ctx.clip();
 
-      // 3. Measure barlines, beat ticks, and measure numbers
-      for (const m of part.measures) {
+      // 4. Shared measure barlines, beat ticks, and measure numbers
+      for (const m of primaryLine.measures) {
         const xStart = beatToX(m.startBeat);
         const xEnd = beatToX(m.endBeat);
         if (xEnd < leftMargin - 40 || xStart > w + 60) continue;
 
-        // Subtle beat subdivisions
-        ctx.strokeStyle = 'rgba(120, 113, 108, 0.14)';
+        // Subtle beat subdivisions on each staff
+        ctx.strokeStyle = 'rgba(120, 113, 108, 0.13)';
         ctx.lineWidth = 1;
         for (let b = 1; b < m.durationBeats; b++) {
           const bx = beatToX(m.startBeat + b);
           if (bx > leftMargin && bx < w) {
-            ctx.beginPath();
-            ctx.moveTo(bx, staffTopY);
-            ctx.lineTo(bx, staffBottomY);
-            ctx.stroke();
+            for (const rl of layouts) {
+              ctx.beginPath();
+              ctx.moveTo(bx, rl.staffTopY);
+              ctx.lineTo(bx, rl.staffBottomY);
+              ctx.stroke();
+            }
           }
         }
 
-        // Measure barline
+        // Measure barline connecting all staves in the system
         if (xStart >= leftMargin - 4 && xStart <= w + 20) {
           ctx.strokeStyle = '#44403c';
-          ctx.lineWidth = 1.6;
+          ctx.lineWidth = 1.5;
           ctx.beginPath();
-          ctx.moveTo(xStart, staffTopY);
-          ctx.lineTo(xStart, staffBottomY);
+          ctx.moveTo(xStart, topStaffTopY);
+          ctx.lineTo(xStart, bottomStaffBottomY);
           ctx.stroke();
 
-          // Measure number
+          // Measure number above top staff
           ctx.fillStyle = '#78716c';
           ctx.font = '600 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
           ctx.textAlign = 'left';
-          ctx.fillText(`m.${m.number}`, xStart + 5, staffTopY - 26);
+          ctx.fillText(`m.${m.number}`, xStart + 5, Math.max(15, topStaffTopY - 22));
         }
       }
 
       // Final double barline
-      const endX = beatToX(part.totalBeats);
+      const totalBeats = lines.reduce((mx, l) => Math.max(mx, l.totalBeats), 0);
+      const endX = beatToX(totalBeats);
       if (endX >= leftMargin && endX <= w + 20) {
         ctx.strokeStyle = '#1c1917';
         ctx.lineWidth = 1.6;
         ctx.beginPath();
-        ctx.moveTo(endX - 6, staffTopY);
-        ctx.lineTo(endX - 6, staffBottomY);
+        ctx.moveTo(endX - 6, topStaffTopY);
+        ctx.lineTo(endX - 6, bottomStaffBottomY);
         ctx.stroke();
 
         ctx.lineWidth = 4;
         ctx.beginPath();
-        ctx.moveTo(endX, staffTopY);
-        ctx.lineTo(endX, staffBottomY);
+        ctx.moveTo(endX, topStaffTopY);
+        ctx.lineTo(endX, bottomStaffBottomY);
         ctx.stroke();
       }
 
-      // 4. Draw notes and rests
-      for (const note of part.notes) {
-        const x = beatToX(note.startBeat);
-        const xEnd = beatToX(note.endBeat);
-        if (xEnd < leftMargin - 40 || x > w + 60) continue;
+      // 5. Draw notes and rests for each line
+      for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+        const line = lines[lineIdx];
+        const rl = layouts[lineIdx];
+        const isTunerLine = lineIdx === tunerLineIdx;
+        const activeIds = new Set(((activeNotesByLine && activeNotesByLine[lineIdx]) || []).map((n) => n.id));
 
-        const isActive = activeNote && note.id === activeNote.id;
+        // Track chord stacking at identical startBeat so note labels don't collide
+        let lastChordBeat = -999;
+        let chordStackIdx = 0;
 
-        if (note.isRest) {
-          this.drawRest(ctx, x, staffTopY, note, isActive);
-        } else {
-          this.drawNote(ctx, x, xEnd, staffTopY, staffBottomY, note, isActive, tunerResult);
+        for (const note of line.notes) {
+          const x = beatToX(note.startBeat);
+          const xEnd = beatToX(note.endBeat);
+          if (xEnd < leftMargin - 40 || x > w + 60) continue;
+
+          const isActive = activeIds.has(note.id);
+
+          if (note.isRest) {
+            this.drawRest(ctx, x, rl.staffTopY, note, isActive, isTunerLine);
+          } else {
+            if (Math.abs(note.startBeat - lastChordBeat) < 0.001) {
+              chordStackIdx++;
+            } else {
+              lastChordBeat = note.startBeat;
+              chordStackIdx = 0;
+            }
+            this.drawNote(
+              ctx,
+              x,
+              xEnd,
+              rl,
+              note,
+              isActive,
+              isTunerLine,
+              isTunerLine ? tunerResult : null,
+              chordStackIdx
+            );
+          }
         }
       }
 
       ctx.restore();
     }
 
-    // 5. Left fixed mask for Clef, Key Signature, and Time Signature
-    const maskGrad = ctx.createLinearGradient(leftMargin - 16, 0, leftMargin + 12, 0);
+    // 6. Left fixed mask for Clefs, Key Signatures, and Time Signatures
+    const maskGrad = ctx.createLinearGradient(leftMargin - 14, 0, leftMargin + 12, 0);
     maskGrad.addColorStop(0, '#fbf9f3');
     maskGrad.addColorStop(0.75, '#fbf9f3');
     maskGrad.addColorStop(1, 'rgba(251, 249, 243, 0)');
     ctx.fillStyle = maskGrad;
     ctx.fillRect(0, 0, leftMargin + 12, h);
 
+    // Re-apply subtle row tint in left margin for tuner row
+    if (lines.length >= 2 && layouts[tunerLineIdx]) {
+      const rl = layouts[tunerLineIdx];
+      ctx.fillStyle = 'rgba(217, 155, 67, 0.065)';
+      ctx.fillRect(0, rl.rowTop, leftMargin + 4, rl.rowHeight);
+    }
+
     // Re-draw staff lines cleanly inside left header
     ctx.strokeStyle = '#57534e';
-    ctx.lineWidth = 1.25;
-    for (let i = 0; i < 5; i++) {
-      const y = staffTopY + i * this.LINE_SPACING;
+    ctx.lineWidth = 1.2;
+    for (const rl of layouts) {
+      for (let s = 0; s < 5; s++) {
+        const y = rl.staffTopY + s * this.LINE_SPACING;
+        ctx.beginPath();
+        ctx.moveTo(14, y);
+        ctx.lineTo(leftMargin + 4, y);
+        ctx.stroke();
+      }
+    }
+
+    // Left vertical system bar connecting staves
+    ctx.strokeStyle = '#292524';
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.moveTo(14, layouts[0].staffTopY);
+    ctx.lineTo(14, layouts[layouts.length - 1].staffBottomY);
+    ctx.stroke();
+
+    // Draw bracket tips for 2-line duet system
+    if (layouts.length >= 2) {
+      ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(14, y);
-      ctx.lineTo(leftMargin + 4, y);
+      ctx.moveTo(8, layouts[0].staffTopY - 4);
+      ctx.lineTo(15, layouts[0].staffTopY);
+      ctx.moveTo(8, layouts[layouts.length - 1].staffBottomY + 4);
+      ctx.lineTo(15, layouts[layouts.length - 1].staffBottomY);
       ctx.stroke();
     }
 
-    // Left vertical brace bar
-    ctx.strokeStyle = '#292524';
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.moveTo(14, staffTopY);
-    ctx.lineTo(14, staffBottomY);
-    ctx.stroke();
+    // Draw Clef, Key Signature, and Time Signature for each line
+    for (let i = 0; i < layouts.length; i++) {
+      const rl = layouts[i];
+      const line = lines[i];
+      const activeClef = line ? line.clef : { sign: 'F', line: 4 };
+      const fifths = line ? line.fifths : 0;
 
-    // Draw Clef, Key Signature, and Time Signature
-    this.drawClef(ctx, 26, staffTopY, activeClef);
-    this.drawKeySignature(ctx, 72, staffBottomY, fifths, activeClef);
-    if (part && part.timeSig) {
-      const timeX = 72 + Math.min(Math.abs(fifths), 7) * 13 + 12;
-      this.drawTimeSignature(ctx, timeX, staffTopY, part.timeSig);
+      this.drawClef(ctx, 22, rl.staffTopY, activeClef);
+      this.drawKeySignature(ctx, 64, rl.staffBottomY, fifths, activeClef);
+      if (line && line.timeSig) {
+        const timeX = 64 + Math.min(Math.abs(fifths), 7) * 12 + 12;
+        this.drawTimeSignature(ctx, timeX, rl.staffTopY, line.timeSig);
+      }
     }
 
-    // 6. Prominent Vertical Evaluation Line ("Playhead")
-    this.drawPlayhead(ctx, playheadX, h, tunerResult, activeNote);
+    // 7. Prominent Vertical Evaluation Line ("Playhead")
+    this.drawPlayhead(ctx, playheadX, h, tunerResult, primaryTunerNote);
   }
 
   evalZoneColor(tunerResult, activeNote) {
     if (!activeNote || activeNote.isRest) return 'rgba(59, 130, 246, 0.08)';
     if (!tunerResult || !tunerResult.micOn || tunerResult.state === 'silent') {
-      return 'rgba(59, 130, 246, 0.12)';
+      return 'rgba(59, 130, 246, 0.13)';
     }
     if (tunerResult.state === 'intune') return 'rgba(34, 197, 94, 0.22)';
     if (tunerResult.state === 'flat' || tunerResult.state === 'sharp') return 'rgba(234, 179, 8, 0.22)';
@@ -248,11 +367,15 @@ class StaffRenderer {
     return 'rgba(59, 130, 246, 0.12)';
   }
 
-  stateToInkColor(state, isActive) {
-    if (state === 'intune') return '#15803d';
-    if (state === 'flat' || state === 'sharp') return '#b45309';
-    if (state === 'off') return '#dc2626';
-    return isActive ? '#1d4ed8' : '#1c1917';
+  stateToInkColor(state, isActive, isTunerLine) {
+    if (isTunerLine) {
+      if (state === 'intune') return '#15803d';
+      if (state === 'flat' || state === 'sharp') return '#b45309';
+      if (state === 'off') return '#dc2626';
+      return isActive ? '#1d4ed8' : '#1c1917';
+    }
+    // Non-tuner accompaniment line: calm highlight when active
+    return isActive ? '#9a5b13' : '#3f3b37';
   }
 
   drawPlayhead(ctx, x, h, tunerResult, activeNote) {
@@ -267,47 +390,49 @@ class StaffRenderer {
     ctx.strokeStyle = lineColor;
     ctx.lineWidth = 2.5;
     ctx.beginPath();
-    ctx.moveTo(x, 18);
-    ctx.lineTo(x, h - 14);
+    ctx.moveTo(x, 16);
+    ctx.lineTo(x, h - 12);
     ctx.stroke();
 
-    // Top diamond/pointer marker
+    // Top pointer marker
     ctx.fillStyle = lineColor;
     ctx.beginPath();
-    ctx.moveTo(x, 22);
-    ctx.lineTo(x - 7, 10);
-    ctx.lineTo(x + 7, 10);
+    ctx.moveTo(x, 20);
+    ctx.lineTo(x - 7, 8);
+    ctx.lineTo(x + 7, 8);
     ctx.closePath();
     ctx.fill();
 
-    // Bottom small cap
+    // Bottom cap
     ctx.beginPath();
-    ctx.arc(x, h - 14, 4, 0, Math.PI * 2);
+    ctx.arc(x, h - 12, 4, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
 
-  drawNote(ctx, x, xEnd, staffTopY, staffBottomY, note, isActive, tunerResult) {
+  drawNote(ctx, x, xEnd, rl, note, isActive, isTunerLine, tunerResult, chordStackIdx) {
+    const { staffTopY, staffBottomY, rowBottom } = rl;
     const y = this.diatonicToY(note.diatonic, note.clef, staffBottomY);
 
-    let effectiveState = note.evalState;
-    if (isActive && tunerResult && tunerResult.micOn && tunerResult.state !== 'silent') {
+    let effectiveState = isTunerLine ? note.evalState : null;
+    if (isTunerLine && isActive && tunerResult && tunerResult.micOn && tunerResult.state !== 'silent') {
       effectiveState = tunerResult.state;
     }
 
-    const ink = this.stateToInkColor(effectiveState, isActive);
+    const ink = this.stateToInkColor(effectiveState, isActive, isTunerLine);
+    const scale = this.LINE_SPACING / 18;
 
-    // Duration sustain ribbon (helps visualize how long to hold the bow!)
-    const ribbonW = Math.max(0, xEnd - x - 12);
+    // Duration sustain ribbon
+    const ribbonW = Math.max(0, xEnd - x - 11);
     if (ribbonW > 6) {
       ctx.save();
       ctx.fillStyle = isActive
         ? this.hexWithAlpha(ink, 0.22)
         : effectiveState
           ? this.hexWithAlpha(ink, 0.12)
-          : 'rgba(28, 25, 23, 0.08)';
+          : 'rgba(28, 25, 23, 0.075)';
       ctx.beginPath();
-      ctx.roundRect(x + 6, y - 5, ribbonW, 10, 5);
+      ctx.roundRect(x + 5, y - 4.5, ribbonW, 9, 4.5);
       ctx.fill();
       ctx.restore();
     }
@@ -315,38 +440,38 @@ class StaffRenderer {
     // Active glow halo behind the notehead
     if (isActive) {
       ctx.save();
-      ctx.fillStyle = this.hexWithAlpha(ink, 0.22);
+      ctx.fillStyle = this.hexWithAlpha(ink, isTunerLine ? 0.22 : 0.15);
       ctx.beginPath();
-      ctx.arc(x, y, 16, 0, Math.PI * 2);
+      ctx.arc(x, y, 14 * scale + 2, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
     }
 
     // Ledger lines above or below the 5-line staff
     ctx.strokeStyle = '#44403c';
-    ctx.lineWidth = 1.4;
+    ctx.lineWidth = 1.3;
     if (y < staffTopY - this.HALF_STEP) {
       for (let ly = staffTopY - this.LINE_SPACING; ly >= y - 1; ly -= this.LINE_SPACING) {
         ctx.beginPath();
-        ctx.moveTo(x - 14, ly);
-        ctx.lineTo(x + 14, ly);
+        ctx.moveTo(x - 13, ly);
+        ctx.lineTo(x + 13, ly);
         ctx.stroke();
       }
     } else if (y > staffBottomY + this.HALF_STEP) {
       for (let ly = staffBottomY + this.LINE_SPACING; ly <= y + 1; ly += this.LINE_SPACING) {
         ctx.beginPath();
-        ctx.moveTo(x - 14, ly);
-        ctx.lineTo(x + 14, ly);
+        ctx.moveTo(x - 13, ly);
+        ctx.lineTo(x + 13, ly);
         ctx.stroke();
       }
     }
 
     // Accidental to the left of notehead
     if (note.displayAccidental) {
-      this.drawAccidental(ctx, x - 19, y, note.displayAccidental, ink);
+      this.drawAccidental(ctx, x - 17, y, note.displayAccidental, ink);
     }
 
-    // Notehead (hollow for whole/half, filled for quarter and shorter)
+    // Notehead
     const isHollow = note.type === 'whole' || note.type === 'half';
     const hasStem = note.type !== 'whole';
 
@@ -354,11 +479,11 @@ class StaffRenderer {
     ctx.translate(x, y);
     ctx.rotate(-0.24);
     ctx.beginPath();
-    ctx.ellipse(0, 0, 8.2, 6.2, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, 7.6 * scale + 0.5, 5.6 * scale + 0.5, 0, 0, Math.PI * 2);
     if (isHollow) {
       ctx.fillStyle = '#fbf9f3';
       ctx.fill();
-      ctx.lineWidth = 2.3;
+      ctx.lineWidth = 2.1;
       ctx.strokeStyle = ink;
       ctx.stroke();
     } else {
@@ -370,44 +495,43 @@ class StaffRenderer {
     // Augmentation dot(s)
     if (note.dots > 0) {
       const onLine = Math.abs(Math.round((staffBottomY - y) / this.HALF_STEP)) % 2 === 0;
-      const dotY = onLine ? y - 4 : y;
+      const dotY = onLine ? y - 3.5 : y;
       ctx.fillStyle = ink;
       for (let d = 0; d < note.dots; d++) {
         ctx.beginPath();
-        ctx.arc(x + 13 + d * 6, dotY, 2.3, 0, Math.PI * 2);
+        ctx.arc(x + 12 + d * 5.5, dotY, 2.1, 0, Math.PI * 2);
         ctx.fill();
       }
     }
 
-    // Stem and Flags
-    if (hasStem) {
+    // Stem and Flags (skip duplicate stem on chord siblings)
+    if (hasStem && !note.isChord) {
       const midStaffY = staffTopY + this.LINE_SPACING * 2;
       const stemUp = y >= midStaffY;
-      const stemLen = 44;
-      const stemX = stemUp ? x + 7.2 : x - 7.2;
+      const stemLen = Math.round(38 * scale + 4);
+      const stemX = stemUp ? x + 6.6 : x - 6.6;
       const stemEndY = stemUp ? y - stemLen : y + stemLen;
 
       ctx.strokeStyle = ink;
-      ctx.lineWidth = 1.8;
+      ctx.lineWidth = 1.7;
       ctx.beginPath();
       ctx.moveTo(stemX, y);
       ctx.lineTo(stemX, stemEndY);
       ctx.stroke();
 
-      // Flags for eighth / 16th / 32nd
       const flagCount = note.type === 'eighth' ? 1 : note.type === '16th' ? 2 : note.type === '32nd' ? 3 : 0;
       if (flagCount > 0) {
         ctx.strokeStyle = ink;
-        ctx.lineWidth = 2.4;
+        ctx.lineWidth = 2.2;
         for (let f = 0; f < flagCount; f++) {
-          const offset = f * 7 * (stemUp ? 1 : -1);
+          const offset = f * 6.5 * (stemUp ? 1 : -1);
           const fy = stemEndY + offset;
           ctx.beginPath();
           ctx.moveTo(stemX, fy);
           if (stemUp) {
-            ctx.quadraticCurveTo(stemX + 11, fy + 6, stemX + 7, fy + 16);
+            ctx.quadraticCurveTo(stemX + 10, fy + 5, stemX + 6, fy + 14);
           } else {
-            ctx.quadraticCurveTo(stemX + 11, fy - 6, stemX + 7, fy - 16);
+            ctx.quadraticCurveTo(stemX + 10, fy - 5, stemX + 6, fy - 14);
           }
           ctx.stroke();
         }
@@ -417,9 +541,9 @@ class StaffRenderer {
     // Tie arc to next note
     if (note.tieToNext) {
       ctx.strokeStyle = ink;
-      ctx.lineWidth = 1.6;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc((x + xEnd) / 2, y + 8, Math.max(10, (xEnd - x) / 2), 0.15 * Math.PI, 0.85 * Math.PI);
+      ctx.arc((x + xEnd) / 2, y + 7, Math.max(9, (xEnd - x) / 2), 0.15 * Math.PI, 0.85 * Math.PI);
       ctx.stroke();
     }
 
@@ -427,47 +551,46 @@ class StaffRenderer {
     if (this.showNoteLabels) {
       ctx.fillStyle = isActive ? ink : '#57534e';
       ctx.font = isActive
-        ? '700 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
-        : '600 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        ? '700 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+        : '600 10.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
       ctx.textAlign = 'center';
-      const labelY = Math.max(staffBottomY + 26, y + 24);
-      ctx.fillText(note.noteName, x, Math.min(this.height - 10, labelY));
+      const baseLabelY = Math.max(staffBottomY + 22, y + 19);
+      const labelY = Math.min(rowBottom - 8 - chordStackIdx * 12, baseLabelY + chordStackIdx * 12);
+      ctx.fillText(note.noteName, x, labelY);
     }
   }
 
-  drawRest(ctx, x, staffTopY, note, isActive) {
+  drawRest(ctx, x, staffTopY, note, isActive, isTunerLine) {
     const midY = staffTopY + this.LINE_SPACING * 2;
     ctx.save();
-    ctx.fillStyle = isActive ? '#2563eb' : '#57534e';
-    ctx.strokeStyle = isActive ? '#2563eb' : '#57534e';
+    const color = isActive ? (isTunerLine ? '#2563eb' : '#9a5b13') : '#57534e';
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
 
     if (note.type === 'whole') {
-      // Hangs from 4th line (staffTopY + LINE_SPACING)
-      ctx.fillRect(x - 7, staffTopY + this.LINE_SPACING, 14, 6);
+      ctx.fillRect(x - 7, staffTopY + this.LINE_SPACING, 14, 5.5);
     } else if (note.type === 'half') {
-      // Sits on 3rd line (midY)
-      ctx.fillRect(x - 7, midY - 6, 14, 6);
+      ctx.fillRect(x - 7, midY - 5.5, 14, 5.5);
     } else if (note.type === 'eighth' || note.type === '16th') {
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 1.9;
       ctx.beginPath();
-      ctx.arc(x - 3, midY - 6, 3, 0, Math.PI * 2);
+      ctx.arc(x - 3, midY - 5, 2.8, 0, Math.PI * 2);
       ctx.fill();
       ctx.beginPath();
-      ctx.moveTo(x - 1, midY - 6);
-      ctx.quadraticCurveTo(x + 6, midY - 4, x + 5, midY - 10);
-      ctx.lineTo(x - 2, midY + 12);
+      ctx.moveTo(x - 1, midY - 5);
+      ctx.quadraticCurveTo(x + 5, midY - 3, x + 4.5, midY - 9);
+      ctx.lineTo(x - 2, midY + 10);
       ctx.stroke();
     } else {
-      // Quarter rest squiggle
-      ctx.lineWidth = 2.4;
+      ctx.lineWidth = 2.2;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
-      ctx.moveTo(x - 3, midY - 14);
-      ctx.lineTo(x + 4, midY - 5);
-      ctx.lineTo(x - 4, midY + 2);
-      ctx.lineTo(x + 3, midY + 10);
-      ctx.quadraticCurveTo(x - 4, midY + 11, x - 2, midY + 16);
+      ctx.moveTo(x - 3, midY - 12);
+      ctx.lineTo(x + 3.5, midY - 4);
+      ctx.lineTo(x - 3.5, midY + 2);
+      ctx.lineTo(x + 3, midY + 9);
+      ctx.quadraticCurveTo(x - 3.5, midY + 10, x - 2, midY + 14);
       ctx.stroke();
     }
     ctx.restore();
@@ -476,7 +599,7 @@ class StaffRenderer {
   drawAccidental(ctx, x, y, symbol, color) {
     ctx.save();
     ctx.fillStyle = color;
-    ctx.font = '700 18px Georgia, "Times New Roman", serif';
+    ctx.font = '700 16px Georgia, "Times New Roman", serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const glyph = symbol === '#' ? '♯'
@@ -489,55 +612,47 @@ class StaffRenderer {
     ctx.restore();
   }
 
-  /**
-   * Draw clean vector Bass, Tenor/Alto, or Treble clef
-   */
   drawClef(ctx, x, staffTopY, clef) {
     ctx.save();
     ctx.strokeStyle = '#1c1917';
     ctx.fillStyle = '#1c1917';
+    const sp = this.LINE_SPACING;
 
     if (!clef || clef.sign === 'F') {
-      // Bass Clef: dot on 4th line (staffTopY + LINE_SPACING), curve down, two dots around 4th line
-      const fLineY = staffTopY + this.LINE_SPACING;
+      const fLineY = staffTopY + sp;
       ctx.beginPath();
-      ctx.arc(x + 7, fLineY + 2, 4.2, 0, Math.PI * 2);
+      ctx.arc(x + 6, fLineY + 1.5, 3.6, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.lineWidth = 3.2;
+      ctx.lineWidth = 2.9;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(x + 4, fLineY + 2);
-      ctx.bezierCurveTo(x + 2, staffTopY - 4, x + 28, staffTopY - 4, x + 27, fLineY + 8);
-      ctx.bezierCurveTo(x + 26, staffTopY + this.LINE_SPACING * 2.7, x + 12, staffTopY + this.LINE_SPACING * 3.5, x + 3, staffTopY + this.LINE_SPACING * 3.85);
+      ctx.moveTo(x + 3.5, fLineY + 1.5);
+      ctx.bezierCurveTo(x + 2, staffTopY - 3, x + 24, staffTopY - 3, x + 23, fLineY + 7);
+      ctx.bezierCurveTo(x + 22, staffTopY + sp * 2.7, x + 11, staffTopY + sp * 3.5, x + 3, staffTopY + sp * 3.85);
       ctx.stroke();
 
-      // Two dots straddling line 4
       ctx.beginPath();
-      ctx.arc(x + 34, fLineY - 5.5, 2.5, 0, Math.PI * 2);
-      ctx.arc(x + 34, fLineY + 5.5, 2.5, 0, Math.PI * 2);
+      ctx.arc(x + 29, fLineY - 4.8, 2.2, 0, Math.PI * 2);
+      ctx.arc(x + 29, fLineY + 4.8, 2.2, 0, Math.PI * 2);
       ctx.fill();
     } else if (clef.sign === 'C') {
-      // Tenor (line 4) or Alto (line 3) C-Clef
-      const cY = clef.line === 4
-        ? staffTopY + this.LINE_SPACING
-        : staffTopY + this.LINE_SPACING * 2;
-      ctx.fillRect(x + 4, staffTopY, 4.5, this.LINE_SPACING * 4);
-      ctx.fillRect(x + 11, staffTopY, 1.8, this.LINE_SPACING * 4);
+      const cY = clef.line === 4 ? staffTopY + sp : staffTopY + sp * 2;
+      ctx.fillRect(x + 3, staffTopY, 4, sp * 4);
+      ctx.fillRect(x + 9.5, staffTopY, 1.6, sp * 4);
 
-      ctx.lineWidth = 2.6;
+      ctx.lineWidth = 2.3;
       ctx.beginPath();
-      ctx.moveTo(x + 13, cY);
-      ctx.bezierCurveTo(x + 26, cY - 12, x + 28, staffTopY, x + 15, staffTopY + 3);
-      ctx.moveTo(x + 13, cY);
-      ctx.bezierCurveTo(x + 26, cY + 12, x + 28, staffTopY + this.LINE_SPACING * 4, x + 15, staffTopY + this.LINE_SPACING * 4 - 3);
+      ctx.moveTo(x + 11, cY);
+      ctx.bezierCurveTo(x + 22, cY - 10, x + 24, staffTopY, x + 13, staffTopY + 3);
+      ctx.moveTo(x + 11, cY);
+      ctx.bezierCurveTo(x + 22, cY + 10, x + 24, staffTopY + sp * 4, x + 13, staffTopY + sp * 4 - 3);
       ctx.stroke();
     } else {
-      // Treble Clef (G clef)
-      ctx.font = '76px Georgia, "Times New Roman", serif';
+      ctx.font = `${Math.round(sp * 4.2)}px Georgia, "Times New Roman", serif`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
-      ctx.fillText('𝄞', x + 2, staffTopY + this.LINE_SPACING * 3.9);
+      ctx.fillText('𝄞', x + 2, staffTopY + sp * 3.9);
     }
 
     ctx.restore();
@@ -548,33 +663,31 @@ class StaffRenderer {
     const isSharp = fifths > 0;
     const count = Math.min(Math.abs(fifths), 7);
 
-    // Diatonic positions for sharps (F C G D A E B) and flats (B E A D G C F) per clef
     let positions;
     if (!clef || clef.sign === 'F') {
       positions = isSharp
-        ? [24, 21, 25, 22, 19, 23, 20] // F3 C3 G3 D3 A2 E3 B2
-        : [20, 23, 19, 22, 18, 21, 17]; // B2 E3 A2 D3 G2 C3 F2
+        ? [24, 21, 25, 22, 19, 23, 20]
+        : [20, 23, 19, 22, 18, 21, 17];
     } else if (clef.sign === 'C' && clef.line === 4) {
       positions = isSharp
         ? [24, 28, 25, 29, 26, 30, 27]
         : [27, 30, 26, 29, 25, 28, 24];
     } else {
-      // Treble clef
       positions = isSharp
-        ? [38, 35, 39, 36, 33, 37, 34] // F5 C5 G5 D5 A4 E5 B4
-        : [34, 37, 33, 36, 32, 35, 31]; // B4 E5 A4 D5 G4 C5 F4
+        ? [38, 35, 39, 36, 33, 37, 34]
+        : [34, 37, 33, 36, 32, 35, 31];
     }
 
     for (let i = 0; i < count; i++) {
       const y = this.diatonicToY(positions[i], clef, staffBottomY);
-      this.drawAccidental(ctx, startX + i * 13, y, isSharp ? '#' : 'b', '#1c1917');
+      this.drawAccidental(ctx, startX + i * 12, y, isSharp ? '#' : 'b', '#1c1917');
     }
   }
 
   drawTimeSignature(ctx, x, staffTopY, timeSig) {
     ctx.save();
     ctx.fillStyle = '#1c1917';
-    ctx.font = '800 26px Georgia, "Times New Roman", serif';
+    ctx.font = `800 ${Math.round(this.LINE_SPACING * 1.45)}px Georgia, "Times New Roman", serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(String(timeSig.beats), x, staffTopY + this.LINE_SPACING * 1.05);
