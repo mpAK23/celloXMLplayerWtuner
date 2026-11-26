@@ -270,6 +270,43 @@ body {
   gap: 16px;
 }
 
+.mic-control-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mic-level-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mic-level-label {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.mic-level-track {
+  flex: 1;
+  height: 5px;
+  background: #0e1118;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.mic-level-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, #22c55e 0%, #facc15 78%, #ef4444 100%);
+  border-radius: 999px;
+  transition: width 0.06s linear;
+}
+
 .note-readouts {
   display: flex;
   gap: 10px;

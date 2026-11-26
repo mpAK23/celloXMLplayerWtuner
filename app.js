@@ -16,6 +16,7 @@
 
   const micBtn = document.getElementById('mic-btn');
   const micBtnLabel = document.getElementById('mic-btn-label');
+  const micLevelFillEl = document.getElementById('mic-level-fill');
   const targetNoteLabelEl = document.getElementById('target-note-label');
   const targetNoteEl = document.getElementById('target-note');
   const detectedNoteEl = document.getElementById('detected-note');
@@ -153,6 +154,7 @@
         soundLabel.classList.toggle('is-checked', soundCb.checked);
         if (soundCb.checked) {
           await CelloAudio.ensureStarted();
+          CelloTuner.resumeIfNeeded();
         } else if (!lineSoundEnabled.some(Boolean)) {
           CelloAudio.stopAll();
         }
@@ -368,9 +370,26 @@
     tunerStatusTextEl.className = 'tuner-status-text';
 
     if (!res.micOn) {
+      if (micBtn.classList.contains('active')) {
+        micBtn.classList.remove('active');
+        micBtn.setAttribute('aria-pressed', 'false');
+        micBtnLabel.textContent = 'Start Tuner';
+      }
+      if (micLevelFillEl) micLevelFillEl.style.width = '0%';
       gaugeNeedleEl.style.left = '50%';
       tunerStatusTextEl.textContent = 'Mic Off';
       centsReadoutEl.textContent = 'Click Start Tuner';
+      return;
+    }
+
+    if (micLevelFillEl) {
+      micLevelFillEl.style.width = `${res.inputLevel || 0}%`;
+    }
+
+    if (res.state === 'suspended') {
+      gaugeNeedleEl.style.left = '50%';
+      tunerStatusTextEl.textContent = 'Audio Paused';
+      centsReadoutEl.textContent = 'Tap screen to resume';
       return;
     }
 
@@ -405,30 +424,10 @@
 
   /**
    * Sample tuner against the active note(s) on the selected tuner line.
-   * If the tuner line has a chord (double-stop), evaluate against the closest chord tone.
+   * If the tuner line has a chord (double-stop), CelloTuner evaluates against the closest chord tone.
    */
   function evaluateTunerForNotes(activeNotes) {
-    const pitched = activeNotes.filter((n) => !n.isRest);
-    if (pitched.length <= 1) {
-      return CelloTuner.sample(pitched[0] || activeNotes[0] || null);
-    }
-
-    // Multiple chord notes: sample once against the first, then re-evaluate against closest pitch
-    const baseRes = CelloTuner.sample(pitched[0]);
-    if (!baseRes.micOn || baseRes.state === 'silent' || !baseRes.detectedFreq) {
-      return baseRes;
-    }
-
-    let bestNote = pitched[0];
-    let bestAbsCents = Infinity;
-    for (const n of pitched) {
-      const c = Math.abs(1200 * Math.log2(baseRes.detectedFreq / n.frequency));
-      if (c < bestAbsCents) {
-        bestAbsCents = c;
-        bestNote = n;
-      }
-    }
-    return CelloTuner.sample(bestNote);
+    return CelloTuner.sample(activeNotes && activeNotes.length > 0 ? activeNotes : null);
   }
 
   /**
@@ -477,7 +476,7 @@
     const tunerResult = evaluateTunerForNotes(tunerActiveNotes);
 
     // Record intonation state onto the tuner-checked line's active notes
-    if (tunerResult.micOn && tunerResult.state !== 'silent') {
+    if (tunerResult.micOn && tunerResult.state !== 'silent' && tunerResult.state !== 'suspended') {
       for (const n of tunerActiveNotes) {
         if (!n.isRest) {
           if (n.evalState !== 'intune' || tunerResult.state === 'intune') {
@@ -495,10 +494,16 @@
 
   // ---------- Event Listeners ----------
 
-  // Pre-warm audio context on first click
+  // Pre-warm audio context on first click & auto-resume tuner AudioContext on iOS/iPadOS taps
   document.body.addEventListener('click', () => {
     CelloAudio.init();
   }, { once: true });
+
+  ['pointerdown', 'touchstart', 'click'].forEach((evt) => {
+    window.addEventListener(evt, () => {
+      CelloTuner.resumeIfNeeded();
+    }, { passive: true });
+  });
 
   // Local Browser FIFO Cache (up to 10 recently uploaded MusicXML files per user)
   const RECENT_STORAGE_KEY = 'celloPlayAlong.recentFiles.v1';
@@ -695,6 +700,7 @@
     if (!currentScore || currentLines.length === 0) return;
     if (!isPlaying && lineSoundEnabled.some(Boolean)) {
       await CelloAudio.ensureStarted();
+      CelloTuner.resumeIfNeeded();
     }
     if (currentBeat >= currentScore.totalBeats) {
       currentBeat = 0;

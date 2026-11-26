@@ -46,10 +46,18 @@
     <!-- Tuner Panel Above the Staff -->
     <section class="tuner-panel" aria-label="Live Cello Tuner">
       <div class="tuner-left">
-        <button type="button" id="mic-btn" class="btn btn-mic" aria-pressed="false">
-          <span class="mic-dot" id="mic-dot"></span>
-          <span id="mic-btn-label">Start Tuner</span>
-        </button>
+        <div class="mic-control-stack">
+          <button type="button" id="mic-btn" class="btn btn-mic" aria-pressed="false">
+            <span class="mic-dot" id="mic-dot"></span>
+            <span id="mic-btn-label">Start Tuner</span>
+          </button>
+          <div class="mic-level-wrap" title="Live microphone input level">
+            <span class="mic-level-label">Input</span>
+            <div class="mic-level-track">
+              <div class="mic-level-fill" id="mic-level-fill"></div>
+            </div>
+          </div>
+        </div>
         <div class="note-readouts">
           <div class="readout-box">
             <span class="readout-label" id="target-note-label">Target (Line 1)</span>
