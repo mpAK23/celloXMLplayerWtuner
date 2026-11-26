@@ -369,10 +369,20 @@ const MusicXMLParser = (() => {
           if (child.querySelector('grace')) continue;
 
           const isChord = Boolean(child.querySelector('chord'));
-          const isRest = Boolean(child.querySelector('rest'));
+          const restEl = child.querySelector('rest');
+          const isRest = Boolean(restEl);
+          const isMeasureRest = Boolean(restEl && restEl.getAttribute('measure') === 'yes');
           const voice = child.querySelector('voice')?.textContent?.trim() || '1';
           const staffNum = child.querySelector('staff')?.textContent?.trim() || '1';
-          const durDiv = parseFloat(child.querySelector('duration')?.textContent) || 0;
+          let durDiv = parseFloat(child.querySelector('duration')?.textContent) || 0;
+          // Soundslice exports <rest measure="yes"/> with 4-beat duration even in 3/4 time;
+          // clamp full-measure rests to the active time signature's measure length.
+          if (isMeasureRest) {
+            const nominalDiv = measureTimeSig.beats * (4 / measureTimeSig.beatType) * divisions;
+            if (nominalDiv > 0 && durDiv > nominalDiv) {
+              durDiv = nominalDiv;
+            }
+          }
           const noteStartDiv = isChord ? lastNoteStartDiv : cursorDiv;
 
           if (!isChord) {

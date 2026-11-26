@@ -15,7 +15,7 @@ class StaffRenderer {
 
     this.LINE_SPACING = 15;
     this.HALF_STEP = this.LINE_SPACING / 2;
-    this.PIXELS_PER_BEAT = 115;
+    this.PIXELS_PER_BEAT = 140;
 
     this.width = 900;
     this.height = 440;
@@ -60,7 +60,7 @@ class StaffRenderer {
 
   getPlayheadX(fifths) {
     const leftMargin = this.getLeftMargin(fifths);
-    return Math.max(leftMargin + 68, Math.round(this.width * 0.27));
+    return Math.max(leftMargin + 150, Math.round(this.width * 0.34));
   }
 
   /**
@@ -114,7 +114,7 @@ class StaffRenderer {
    * Main render pass for a given beat position, active notes per line, and live tuner result.
    * activeNotesByLine: Array<Array<Note>> (active pitched notes or rest per line)
    */
-  render(currentBeat, activeNotesByLine, tunerResult) {
+  render(currentBeat, activeNotesByLine, tunerResult, countInInfo = null) {
     const ctx = this.ctx;
     const w = this.width;
     const h = this.height;
@@ -354,24 +354,97 @@ class StaffRenderer {
 
     // 7. Prominent Vertical Evaluation Line ("Playhead")
     this.drawPlayhead(ctx, playheadX, h, tunerResult, primaryTunerNote);
+
+    // 8. Optional 2-Measure Count-In Visual Badge over the playhead
+    if (countInInfo) {
+      this.drawCountInBadge(ctx, playheadX, h, countInInfo);
+    }
+  }
+
+  drawCountInBadge(ctx, playheadX, h, info) {
+    ctx.save();
+    const boxW = 166;
+    const boxH = 66;
+    const cx = Math.max(boxW / 2 + 12, Math.min(this.width - boxW / 2 - 12, playheadX));
+    const cy = Math.round(h * 0.5);
+    const x = Math.round(cx - boxW / 2);
+    const y = Math.round(cy - boxH / 2);
+
+    // Subtle pulse on each beat
+    const pulse = Math.max(0, 1 - (info.beatProgress || 0) * 2.5);
+    const isDownbeat = info.beat === 1;
+
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
+    ctx.shadowBlur = 16;
+    ctx.shadowOffsetY = 4;
+    ctx.fillStyle = 'rgba(17, 19, 25, 0.92)';
+    ctx.beginPath();
+    ctx.roundRect(x, y, boxW, boxH, 14);
+    ctx.fill();
+
+    ctx.shadowColor = 'transparent';
+    ctx.lineWidth = isDownbeat ? 2.5 : 1.8;
+    ctx.strokeStyle = isDownbeat
+      ? `rgba(217, 155, 67, ${0.7 + 0.3 * pulse})`
+      : `rgba(59, 130, 246, ${0.55 + 0.35 * pulse})`;
+    ctx.stroke();
+
+    // Header: COUNT-IN · BAR 1 OF 2
+    ctx.fillStyle = isDownbeat ? '#f5c26b' : '#93c5fd';
+    ctx.font = '700 10.5px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`COUNT-IN · BAR ${info.bar} OF ${info.totalBars}`, cx, y + 18);
+
+    // Big beat number + beat dots
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `800 ${Math.round(24 + pulse * 3)}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+    ctx.fillText(String(info.beat), cx - 34, y + 45);
+
+    const dotsCount = Math.min(8, Math.max(1, info.beatsPerMeasure || 4));
+    const dotSpacing = 14;
+    const dotsStartX = cx - 4;
+    for (let i = 1; i <= dotsCount; i++) {
+      const dx = dotsStartX + (i - 1) * dotSpacing;
+      const dy = y + 45;
+      ctx.beginPath();
+      ctx.arc(dx, dy, i === info.beat ? 5 : 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = i === info.beat
+        ? (isDownbeat ? '#f59e0b' : '#3b82f6')
+        : i < info.beat
+          ? 'rgba(255, 255, 255, 0.45)'
+          : 'rgba(255, 255, 255, 0.16)';
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   evalZoneColor(tunerResult, activeNote) {
     if (!activeNote || activeNote.isRest) return 'rgba(59, 130, 246, 0.08)';
-    if (!tunerResult || !tunerResult.micOn || tunerResult.state === 'silent') {
+    if (!tunerResult || !tunerResult.micOn || tunerResult.state === 'silent' || tunerResult.state === 'suspended' || tunerResult.state === 'nosignal') {
       return 'rgba(59, 130, 246, 0.13)';
     }
-    if (tunerResult.state === 'intune') return 'rgba(34, 197, 94, 0.22)';
-    if (tunerResult.state === 'flat' || tunerResult.state === 'sharp') return 'rgba(234, 179, 8, 0.22)';
-    if (tunerResult.state === 'off') return 'rgba(239, 68, 68, 0.22)';
+    if (tunerResult.state === 'intune') return 'rgba(34, 197, 94, 0.26)';
+    if (tunerResult.state === 'flat') return 'rgba(250, 204, 21, 0.34)';
+    if (tunerResult.state === 'sharp') return 'rgba(249, 115, 22, 0.28)';
+    if (tunerResult.state === 'off') return 'rgba(239, 68, 68, 0.26)';
     return 'rgba(59, 130, 246, 0.12)';
+  }
+
+  stateToHighlightColor(state) {
+    if (state === 'intune') return '#22c55e'; // Green
+    if (state === 'flat') return '#facc15';   // Yellow
+    if (state === 'sharp') return '#f97316';  // Orange
+    if (state === 'off') return '#ef4444';    // Red
+    return null;
   }
 
   stateToInkColor(state, isActive, isTunerLine) {
     if (isTunerLine) {
-      if (state === 'intune') return '#15803d';
-      if (state === 'flat' || state === 'sharp') return '#b45309';
-      if (state === 'off') return '#dc2626';
+      if (state === 'intune') return '#15803d'; // Rich green
+      if (state === 'flat') return '#a16207';   // Crisp golden-yellow outline/stem
+      if (state === 'sharp') return '#c2410c';  // Deep orange outline/stem
+      if (state === 'off') return '#dc2626';    // Vivid red
       return isActive ? '#1d4ed8' : '#1c1917';
     }
     // Non-tuner accompaniment line: calm highlight when active
@@ -382,7 +455,8 @@ class StaffRenderer {
     let lineColor = '#2563eb';
     if (activeNote && !activeNote.isRest && tunerResult && tunerResult.micOn) {
       if (tunerResult.state === 'intune') lineColor = '#16a34a';
-      else if (tunerResult.state === 'flat' || tunerResult.state === 'sharp') lineColor = '#d97706';
+      else if (tunerResult.state === 'flat') lineColor = '#eab308';
+      else if (tunerResult.state === 'sharp') lineColor = '#f97316';
       else if (tunerResult.state === 'off') lineColor = '#dc2626';
     }
 
@@ -415,35 +489,63 @@ class StaffRenderer {
     const y = this.diatonicToY(note.diatonic, note.clef, staffBottomY);
 
     let effectiveState = isTunerLine ? note.evalState : null;
-    if (isTunerLine && isActive && tunerResult && tunerResult.micOn && tunerResult.state !== 'silent') {
+    if (
+      isTunerLine &&
+      isActive &&
+      tunerResult &&
+      tunerResult.micOn &&
+      tunerResult.state !== 'silent' &&
+      tunerResult.state !== 'suspended' &&
+      tunerResult.state !== 'nosignal'
+    ) {
       effectiveState = tunerResult.state;
     }
 
     const ink = this.stateToInkColor(effectiveState, isActive, isTunerLine);
+    const highlight = isTunerLine ? this.stateToHighlightColor(effectiveState) : null;
     const scale = this.LINE_SPACING / 18;
 
-    // Duration sustain ribbon
-    const ribbonW = Math.max(0, xEnd - x - 11);
+    // Duration sustain ribbon (extends nearly the full duration up to the next note)
+    const ribbonW = Math.max(0, xEnd - x - 2);
     if (ribbonW > 6) {
       ctx.save();
-      ctx.fillStyle = isActive
-        ? this.hexWithAlpha(ink, 0.22)
+      const ribbonBase = highlight || ink;
+      const ribbonAlpha = isActive
+        ? (effectiveState === 'flat' ? 0.58 : 0.42)
         : effectiveState
-          ? this.hexWithAlpha(ink, 0.12)
-          : 'rgba(28, 25, 23, 0.075)';
+          ? (effectiveState === 'flat' ? 0.42 : 0.28)
+          : 0.085;
+      ctx.fillStyle = (isActive || effectiveState)
+        ? this.hexWithAlpha(ribbonBase, ribbonAlpha)
+        : 'rgba(28, 25, 23, 0.085)';
       ctx.beginPath();
-      ctx.roundRect(x + 5, y - 4.5, ribbonW, 9, 4.5);
+      ctx.roundRect(x + 4, y - 6.5, ribbonW, 13, 6.5);
       ctx.fill();
       ctx.restore();
     }
 
-    // Active glow halo behind the notehead
-    if (isActive) {
+    // Prominent intonation highlight halo around the notehead (green / yellow / orange / red)
+    if (isActive || highlight) {
       ctx.save();
-      ctx.fillStyle = this.hexWithAlpha(ink, isTunerLine ? 0.22 : 0.15);
+      const haloColor = highlight || ink;
+      const haloRadius = isActive ? (17 * scale + 3) : (12.5 * scale + 1.5);
+      const fillAlpha = isActive
+        ? (effectiveState === 'flat' ? 0.56 : highlight ? 0.36 : (isTunerLine ? 0.22 : 0.14))
+        : (effectiveState === 'flat' ? 0.36 : 0.22);
+
+      ctx.fillStyle = this.hexWithAlpha(haloColor, fillAlpha);
       ctx.beginPath();
-      ctx.arc(x, y, 14 * scale + 2, 0, Math.PI * 2);
+      ctx.arc(x, y, haloRadius, 0, Math.PI * 2);
       ctx.fill();
+
+      // Crisp colored ring on active evaluated note so it's unmistakable in peripheral vision
+      if (isActive && highlight) {
+        ctx.strokeStyle = effectiveState === 'flat' ? '#eab308' : highlight;
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.arc(x, y, haloRadius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
@@ -481,9 +583,17 @@ class StaffRenderer {
     ctx.beginPath();
     ctx.ellipse(0, 0, 7.6 * scale + 0.5, 5.6 * scale + 0.5, 0, 0, Math.PI * 2);
     if (isHollow) {
-      ctx.fillStyle = '#fbf9f3';
+      ctx.fillStyle = highlight
+        ? this.hexWithAlpha(highlight, effectiveState === 'flat' ? 0.62 : 0.34)
+        : '#fbf9f3';
       ctx.fill();
-      ctx.lineWidth = 2.1;
+      ctx.lineWidth = highlight ? 2.4 : 2.1;
+      ctx.strokeStyle = ink;
+      ctx.stroke();
+    } else if (highlight) {
+      ctx.fillStyle = highlight;
+      ctx.fill();
+      ctx.lineWidth = 1.6;
       ctx.strokeStyle = ink;
       ctx.stroke();
     } else {

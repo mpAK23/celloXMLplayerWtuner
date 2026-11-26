@@ -24,7 +24,7 @@ const CelloTuner = (() => {
   const CLOSE_CENTS = 45;     // Yellow + Flat/Sharp needle: ±12 to ±45 cents
                               // Red ("Off"): > 45 cents or wrong note
 
-  const SAMPLE_INTERVAL_MS = 35; // ~28 Hz pitch updates (smooth UI, low CPU on iPad)
+  const SAMPLE_INTERVAL_MS = 25; // ~40 Hz pitch updates for snappy note transitions
 
   let audioCtx = null;
   let analyser = null;
@@ -37,9 +37,9 @@ const CelloTuner = (() => {
   let selectedDeviceId = '';
   let activeDeviceLabel = '';
 
-  // Short median buffer for glitch-free pitch reading
+  // Short median buffer for glitch-free pitch reading (flushes immediately on note jumps)
   const freqHistory = [];
-  const HISTORY_SIZE = 4;
+  const HISTORY_SIZE = 3;
 
   // Cached last pitch reading for frame throttling
   let lastSampleTime = 0;
@@ -322,6 +322,35 @@ const CelloTuner = (() => {
 
     if (tauEstimate === -1) return null;
 
+    // 4b. Octave / sub-harmonic correction for cello & small speakers:
+    // When the 2nd or 3rd harmonic is stronger than the fundamental (common on low cello
+    // strings and laptop/iPad speakers), YIN's first-dip search can lock onto 2*f or 3*f.
+    // Check 2*tau and 3*tau: if the waveform is significantly MORE periodic at 2*tau or 3*tau
+    // (lower d'(tau)), that longer period is the true fundamental.
+    if (yinBuffer[tauEstimate] > 0.008) {
+      const baseVal = yinBuffer[tauEstimate];
+      for (const mult of [2, 3]) {
+        const targetTau = Math.round(tauEstimate * mult);
+        if (targetTau >= maxTau) break;
+        const radius = Math.max(2, Math.round(targetTau * 0.04));
+        const lo = Math.max(minTau, targetTau - radius);
+        const hi = Math.min(maxTau - 1, targetTau + radius);
+        let bestSubTau = -1;
+        let bestSubVal = Infinity;
+        for (let t = lo; t <= hi; t++) {
+          if (yinBuffer[t] < bestSubVal) {
+            bestSubVal = yinBuffer[t];
+            bestSubTau = t;
+          }
+        }
+        const factor = mult === 2 ? 0.78 : 0.65;
+        if (bestSubTau !== -1 && bestSubVal < baseVal * factor) {
+          tauEstimate = bestSubTau;
+          break;
+        }
+      }
+    }
+
     // 5. Parabolic interpolation for sub-sample precision
     let betterTau = tauEstimate;
     if (tauEstimate > 1 && tauEstimate < maxTau) {
@@ -409,6 +438,15 @@ const CelloTuner = (() => {
       lastRawFreq = rawFreq;
 
       if (rawFreq) {
+        // Flush stale pitch history immediately when jumping to a new note (> 70 cents)
+        // so the previous note doesn't linger and flash red on the new note
+        if (freqHistory.length > 0) {
+          const prevMedian = median(freqHistory);
+          const jumpCents = Math.abs(1200 * Math.log2(rawFreq / prevMedian));
+          if (jumpCents > 70) {
+            freqHistory.length = 0;
+          }
+        }
         freqHistory.push(rawFreq);
         if (freqHistory.length > HISTORY_SIZE) freqHistory.shift();
       } else if (freqHistory.length > 0) {

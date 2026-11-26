@@ -68,28 +68,60 @@
   let lastMetronomeBeat = -1;
   let needsInitialAudioTrigger = true;
 
-  // Lightweight Web Audio synth for optional metronome click
+  // 2-measure count-in state (plays clicks even when Metronome toggle is off)
+  let isCountingIn = false;
+  let countInElapsedBeats = 0;
+  let countInTotalBeats = 8;
+  let countInBeatsPerMeasure = 4;
+  let lastCountInBeat = -1;
+
+  // Lightweight Web Audio synth for metronome & count-in clicks
   let metroCtx = null;
 
-  function playMetronomeClick(isDownbeat) {
+  function ensureMetronomeContext() {
     try {
       if (!metroCtx) {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         metroCtx = new AudioContextClass();
       }
-      if (metroCtx.state === 'suspended') metroCtx.resume();
+      if (metroCtx.state === 'suspended' || metroCtx.state === 'interrupted') {
+        metroCtx.resume().catch(() => {});
+      }
+    } catch (_) {}
+  }
+
+  function playMetronomeClick(isDownbeat) {
+    try {
+      ensureMetronomeContext();
+      if (!metroCtx) return;
       const now = metroCtx.currentTime;
       const osc = metroCtx.createOscillator();
       const gain = metroCtx.createGain();
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(isDownbeat ? 1150 : 820, now);
-      gain.gain.setValueAtTime(0.14, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
+      gain.gain.setValueAtTime(isDownbeat ? 0.22 : 0.15, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
       osc.connect(gain);
       gain.connect(metroCtx.destination);
       osc.start(now);
-      osc.stop(now + 0.05);
+      osc.stop(now + 0.055);
     } catch (_) {}
+  }
+
+  function getBeatsPerMeasure() {
+    const primary = currentLines[0];
+    const ts = primary && primary.timeSig;
+    if (ts && ts.beats && ts.beatType) {
+      const quarterBeats = ts.beats * (4 / ts.beatType);
+      return Math.max(1, Math.round(quarterBeats));
+    }
+    return 4;
+  }
+
+  function cancelCountIn() {
+    isCountingIn = false;
+    countInElapsedBeats = 0;
+    lastCountInBeat = -1;
   }
 
   // Subscribe to CelloAudio sample loading status
@@ -265,12 +297,22 @@
     syncProgressUI();
   }
 
-  function setPlaying(playing) {
+  function setPlaying(playing, withCountIn = false) {
     isPlaying = playing;
     lastFrameTime = null;
     if (playing) {
       needsInitialAudioTrigger = true;
+      if (withCountIn) {
+        countInBeatsPerMeasure = getBeatsPerMeasure();
+        countInTotalBeats = countInBeatsPerMeasure * 2;
+        countInElapsedBeats = 0;
+        lastCountInBeat = -1;
+        isCountingIn = true;
+      } else {
+        cancelCountIn();
+      }
     } else {
+      cancelCountIn();
       CelloAudio.stopAll();
     }
     playBtn.classList.toggle('playing', isPlaying);
@@ -447,40 +489,102 @@
    * Main animation loop
    */
   function tick(timestamp) {
+    let countInInfo = null;
+
     if (isPlaying && currentScore && currentLines.length > 0) {
       if (lastFrameTime === null) lastFrameTime = timestamp;
       const dtSec = Math.min(0.1, (timestamp - lastFrameTime) / 1000);
       lastFrameTime = timestamp;
-
-      const prevBeat = currentBeat;
       const beatsPerSec = getEffectiveBpm() / 60;
-      currentBeat += dtSec * beatsPerSec;
 
-      // Trigger Tone.js cello audio for any lines with Sound enabled
-      if (lineSoundEnabled.some(Boolean)) {
-        triggerAudioInRange(prevBeat, currentBeat, needsInitialAudioTrigger);
-        needsInitialAudioTrigger = false;
-      } else {
-        needsInitialAudioTrigger = false;
-      }
+      if (isCountingIn) {
+        // Trigger beat 1 immediately at elapsed = 0, then on each integer beat crossing
+        const prevElapsed = countInElapsedBeats;
+        countInElapsedBeats += dtSec * beatsPerSec;
 
-      // Optional metronome click on integer beat crossings
-      if (toggleMetronomeEl.checked) {
-        const wholeBeat = Math.floor(currentBeat);
-        if (wholeBeat !== lastMetronomeBeat && wholeBeat >= 0) {
-          lastMetronomeBeat = wholeBeat;
-          const mInfo = findCurrentMeasure(currentBeat);
-          const beatInMeasure = mInfo.measure ? Math.round(currentBeat - mInfo.measure.startBeat) : 0;
-          playMetronomeClick(beatInMeasure === 0);
+        const currentWhole = Math.floor(prevElapsed);
+        if (currentWhole !== lastCountInBeat && currentWhole >= 0 && currentWhole < countInTotalBeats) {
+          lastCountInBeat = currentWhole;
+          const beatInBar = currentWhole % countInBeatsPerMeasure;
+          playMetronomeClick(beatInBar === 0);
         }
-      }
 
-      if (currentBeat >= currentScore.totalBeats) {
-        currentBeat = currentScore.totalBeats;
-        setPlaying(false);
-      }
+        const nextWhole = Math.floor(countInElapsedBeats);
+        if (nextWhole !== lastCountInBeat && nextWhole >= 0 && nextWhole < countInTotalBeats) {
+          lastCountInBeat = nextWhole;
+          const beatInBar = nextWhole % countInBeatsPerMeasure;
+          playMetronomeClick(beatInBar === 0);
+        }
 
-      syncProgressUI();
+        if (countInElapsedBeats >= countInTotalBeats) {
+          // Seamless transition into the music with exact beat alignment
+          const overshoot = countInElapsedBeats - countInTotalBeats;
+          cancelCountIn();
+          const prevBeat = currentBeat;
+          currentBeat += overshoot;
+          needsInitialAudioTrigger = true;
+          lastMetronomeBeat = Math.floor(currentBeat) - 1;
+
+          if (lineSoundEnabled.some(Boolean)) {
+            triggerAudioInRange(prevBeat, currentBeat, true);
+            needsInitialAudioTrigger = false;
+          } else {
+            needsInitialAudioTrigger = false;
+          }
+
+          if (toggleMetronomeEl.checked) {
+            const wholeBeat = Math.floor(currentBeat);
+            if (wholeBeat !== lastMetronomeBeat && wholeBeat >= 0) {
+              lastMetronomeBeat = wholeBeat;
+              const mInfo = findCurrentMeasure(currentBeat);
+              const beatInMeasure = mInfo.measure ? Math.round(currentBeat - mInfo.measure.startBeat) : 0;
+              playMetronomeClick(beatInMeasure === 0);
+            }
+          }
+          syncProgressUI();
+        } else {
+          const activeWhole = Math.min(countInTotalBeats - 1, Math.floor(countInElapsedBeats));
+          const bar = Math.floor(activeWhole / countInBeatsPerMeasure) + 1;
+          const beat = (activeWhole % countInBeatsPerMeasure) + 1;
+          countInInfo = {
+            bar,
+            totalBars: 2,
+            beat,
+            beatsPerMeasure: countInBeatsPerMeasure,
+            beatProgress: countInElapsedBeats - activeWhole,
+          };
+          measureIndicatorEl.textContent = `Count-In · Bar ${bar} / 2 · Beat ${beat}`;
+        }
+      } else {
+        const prevBeat = currentBeat;
+        currentBeat += dtSec * beatsPerSec;
+
+        // Trigger Tone.js cello audio for any lines with Sound enabled
+        if (lineSoundEnabled.some(Boolean)) {
+          triggerAudioInRange(prevBeat, currentBeat, needsInitialAudioTrigger);
+          needsInitialAudioTrigger = false;
+        } else {
+          needsInitialAudioTrigger = false;
+        }
+
+        // Optional metronome click on integer beat crossings
+        if (toggleMetronomeEl.checked) {
+          const wholeBeat = Math.floor(currentBeat);
+          if (wholeBeat !== lastMetronomeBeat && wholeBeat >= 0) {
+            lastMetronomeBeat = wholeBeat;
+            const mInfo = findCurrentMeasure(currentBeat);
+            const beatInMeasure = mInfo.measure ? Math.round(currentBeat - mInfo.measure.startBeat) : 0;
+            playMetronomeClick(beatInMeasure === 0);
+          }
+        }
+
+        if (currentBeat >= currentScore.totalBeats) {
+          currentBeat = currentScore.totalBeats;
+          setPlaying(false);
+        }
+
+        syncProgressUI();
+      }
     }
 
     const activeNotesByLine = currentLines.map((line) => findActiveNotesForLine(line, currentBeat));
@@ -488,8 +592,8 @@
     const tunerActiveNotes = activeNotesByLine[safeTunerIdx] || [];
     const tunerResult = evaluateTunerForNotes(tunerActiveNotes);
 
-    // Record intonation state onto the tuner-checked line's active notes
-    if (tunerResult.micOn && tunerResult.state !== 'silent' && tunerResult.state !== 'suspended' && tunerResult.state !== 'nosignal') {
+    // Record intonation state onto the tuner-checked line's active notes (skip during count-in)
+    if (!isCountingIn && tunerResult.micOn && tunerResult.state !== 'silent' && tunerResult.state !== 'suspended' && tunerResult.state !== 'nosignal') {
       for (const n of tunerActiveNotes) {
         if (!n.isRest) {
           if (n.evalState !== 'intune' || tunerResult.state === 'intune') {
@@ -500,7 +604,7 @@
     }
 
     updateTunerUI(tunerActiveNotes, tunerResult);
-    staff.render(currentBeat, activeNotesByLine, tunerResult);
+    staff.render(currentBeat, activeNotesByLine, tunerResult, countInInfo);
 
     requestAnimationFrame(tick);
   }
@@ -751,15 +855,22 @@
   // Play / Pause & Restart
   playBtn.addEventListener('click', async () => {
     if (!currentScore || currentLines.length === 0) return;
-    if (!isPlaying && lineSoundEnabled.some(Boolean)) {
-      await CelloAudio.ensureStarted();
-      CelloTuner.resumeIfNeeded();
+    if (!isPlaying) {
+      // Unlock click audio synchronously inside user gesture (critical for iPadOS Safari)
+      ensureMetronomeContext();
+      if (lineSoundEnabled.some(Boolean)) {
+        await CelloAudio.ensureStarted();
+        CelloTuner.resumeIfNeeded();
+      }
+      if (currentBeat >= currentScore.totalBeats) {
+        currentBeat = 0;
+        clearNoteEvaluations();
+      }
+      setPlaying(true, true);
+    } else {
+      setPlaying(false);
+      syncProgressUI();
     }
-    if (currentBeat >= currentScore.totalBeats) {
-      currentBeat = 0;
-      clearNoteEvaluations();
-    }
-    setPlaying(!isPlaying);
   });
 
   restartBtn.addEventListener('click', () => {
@@ -781,6 +892,7 @@
   // Progress slider scrubbing
   progressSliderEl.addEventListener('input', () => {
     if (!currentScore) return;
+    cancelCountIn();
     const pct = parseFloat(progressSliderEl.value) || 0;
     currentBeat = (pct / 100) * currentScore.totalBeats;
     lastMetronomeBeat = Math.floor(currentBeat);
@@ -801,6 +913,7 @@
 
   staffContainerEl.addEventListener('pointerdown', (e) => {
     if (!currentScore) return;
+    cancelCountIn();
     isDraggingStaff = true;
     dragStartX = e.clientX;
     dragStartBeat = currentBeat;
