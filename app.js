@@ -17,6 +17,7 @@
   const micBtn = document.getElementById('mic-btn');
   const micBtnLabel = document.getElementById('mic-btn-label');
   const micLevelFillEl = document.getElementById('mic-level-fill');
+  const micSelectEl = document.getElementById('mic-select');
   const targetNoteLabelEl = document.getElementById('target-note-label');
   const targetNoteEl = document.getElementById('target-note');
   const detectedNoteEl = document.getElementById('detected-note');
@@ -393,10 +394,22 @@
       return;
     }
 
+    if (res.state === 'nosignal') {
+      gaugeNeedleEl.style.left = '50%';
+      tunerStatusTextEl.textContent = 'No Mic Signal';
+      centsReadoutEl.textContent = 'Check mic / try another input';
+      return;
+    }
+
     if (res.state === 'silent') {
       gaugeNeedleEl.style.left = '50%';
-      tunerStatusTextEl.textContent = 'Listening…';
-      centsReadoutEl.textContent = 'Play a note';
+      if ((res.inputLevel || 0) >= 8) {
+        tunerStatusTextEl.textContent = 'Hearing Sound…';
+        centsReadoutEl.textContent = 'Hold a steady note';
+      } else {
+        tunerStatusTextEl.textContent = 'Listening…';
+        centsReadoutEl.textContent = 'Play a note';
+      }
       return;
     }
 
@@ -476,7 +489,7 @@
     const tunerResult = evaluateTunerForNotes(tunerActiveNotes);
 
     // Record intonation state onto the tuner-checked line's active notes
-    if (tunerResult.micOn && tunerResult.state !== 'silent' && tunerResult.state !== 'suspended') {
+    if (tunerResult.micOn && tunerResult.state !== 'silent' && tunerResult.state !== 'suspended' && tunerResult.state !== 'nosignal') {
       for (const n of tunerActiveNotes) {
         if (!n.isRest) {
           if (n.evalState !== 'intune' || tunerResult.state === 'intune') {
@@ -673,6 +686,27 @@
     }
   });
 
+  async function refreshMicList() {
+    if (!micSelectEl) return;
+    const mics = await CelloTuner.listMicrophones();
+    micSelectEl.innerHTML = '';
+    if (mics.length === 0) {
+      micSelectEl.classList.add('hidden');
+      return;
+    }
+    mics.forEach((m) => {
+      const opt = document.createElement('option');
+      opt.value = m.deviceId;
+      opt.textContent = m.label;
+      micSelectEl.appendChild(opt);
+    });
+    const activeId = CelloTuner.getSelectedDeviceId();
+    if (activeId && mics.some((m) => m.deviceId === activeId)) {
+      micSelectEl.value = activeId;
+    }
+    micSelectEl.classList.remove('hidden');
+  }
+
   // Mic / Tuner button
   micBtn.addEventListener('click', async () => {
     if (CelloTuner.getActive()) {
@@ -682,10 +716,12 @@
       micBtnLabel.textContent = 'Start Tuner';
     } else {
       try {
-        await CelloTuner.start();
+        const chosenId = micSelectEl && !micSelectEl.classList.contains('hidden') ? micSelectEl.value : '';
+        await CelloTuner.start(chosenId);
         micBtn.classList.add('active');
         micBtn.setAttribute('aria-pressed', 'true');
         micBtnLabel.textContent = 'Tuner Active';
+        await refreshMicList();
       } catch (err) {
         alert(
           'Could not access microphone. Please allow microphone permission in your browser.\n\n' +
@@ -694,6 +730,23 @@
       }
     }
   });
+
+  if (micSelectEl) {
+    micSelectEl.addEventListener('change', async () => {
+      if (!CelloTuner.getActive()) return;
+      try {
+        await CelloTuner.start(micSelectEl.value);
+      } catch (err) {
+        alert('Could not switch microphone.\n\n' + (err.message || ''));
+      }
+    });
+  }
+
+  if (navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
+    navigator.mediaDevices.addEventListener('devicechange', () => {
+      if (CelloTuner.getActive()) refreshMicList();
+    });
+  }
 
   // Play / Pause & Restart
   playBtn.addEventListener('click', async () => {

@@ -34,6 +34,8 @@ const CelloTuner = (() => {
   let timeBuffer = null;
   let byteBuffer = null;
   let isRunning = false;
+  let selectedDeviceId = '';
+  let activeDeviceLabel = '';
 
   // Short median buffer for glitch-free pitch reading
   const freqHistory = [];
@@ -43,6 +45,8 @@ const CelloTuner = (() => {
   let lastSampleTime = 0;
   let lastRawFreq = null;
   let lastRms = 0;
+  let nonZeroEverSeen = false;
+  let startedAtTime = 0;
 
   function resumeIfNeeded() {
     if (!isRunning || !audioCtx) return;
@@ -54,34 +58,68 @@ const CelloTuner = (() => {
     }
   }
 
-  async function requestMicStream() {
+  async function listMicrophones() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return [];
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices
+        .filter((d) => d.kind === 'audioinput')
+        .map((d, idx) => ({
+          deviceId: d.deviceId,
+          label: d.label || `Microphone ${idx + 1}`,
+        }));
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function getActiveDeviceLabel() {
+    return activeDeviceLabel;
+  }
+
+  function getSelectedDeviceId() {
+    return selectedDeviceId;
+  }
+
+  async function requestMicStream(deviceId) {
+    const audioConstraints = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    };
+    if (deviceId) {
+      audioConstraints.deviceId = { exact: deviceId };
+    }
+
     // Prefer raw audio without speech processing (best for musical pitch detection)
     try {
       return await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        },
+        audio: audioConstraints,
         video: false,
       });
     } catch (err) {
       // Fallback for browsers/devices that reject advanced audio constraints
       if (err && (err.name === 'OverconstrainedError' || err.name === 'TypeError' || err.name === 'NotSupportedError')) {
-        return await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const fallbackAudio = deviceId ? { deviceId: { ideal: deviceId } } : true;
+        return await navigator.mediaDevices.getUserMedia({ audio: fallbackAudio, video: false });
       }
       throw err;
     }
   }
 
-  async function start() {
-    if (isRunning) {
+  async function start(deviceId = selectedDeviceId) {
+    if (isRunning && deviceId === selectedDeviceId) {
       resumeIfNeeded();
       return true;
     }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error('Microphone access is not supported in this browser (HTTPS required on iPad/mobile).');
+    if (isRunning) {
+      stop();
     }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Microphone access is not supported in this browser (HTTPS or localhost required).');
+    }
+
+    selectedDeviceId = deviceId || '';
 
     // CRITICAL for iOS / iPadOS Safari:
     // Create and resume the AudioContext synchronously INSIDE the click gesture,
@@ -101,7 +139,7 @@ const CelloTuner = (() => {
     } catch (_) {}
 
     try {
-      mediaStream = await requestMicStream();
+      mediaStream = await requestMicStream(selectedDeviceId);
     } catch (err) {
       try { ctx.close(); } catch (_) {}
       throw err;
@@ -122,8 +160,14 @@ const CelloTuner = (() => {
       }
     };
 
-    // Detect if the OS/user revokes or ends the mic track externally
-    mediaStream.getAudioTracks().forEach((track) => {
+    // Track active device label & detect if OS/user revokes or ends the mic track externally
+    const audioTracks = mediaStream.getAudioTracks();
+    activeDeviceLabel = (audioTracks[0] && audioTracks[0].label) || '';
+    if (!selectedDeviceId && audioTracks[0] && typeof audioTracks[0].getSettings === 'function') {
+      const settings = audioTracks[0].getSettings();
+      if (settings && settings.deviceId) selectedDeviceId = settings.deviceId;
+    }
+    audioTracks.forEach((track) => {
       track.onended = () => {
         if (isRunning) stop();
       };
@@ -150,6 +194,8 @@ const CelloTuner = (() => {
     lastSampleTime = 0;
     lastRawFreq = null;
     lastRms = 0;
+    nonZeroEverSeen = false;
+    startedAtTime = performance.now();
     isRunning = true;
     return true;
   }
@@ -223,6 +269,7 @@ const CelloTuner = (() => {
     }
     const rms = Math.sqrt(sumSq / bufferSize);
     lastRms = rms;
+    if (rms > 1e-6) nonZeroEverSeen = true;
     if (rms < RMS_THRESHOLD) return null;
 
     const minTau = Math.max(2, Math.floor(sampleRate / MAX_FREQ));
@@ -372,9 +419,10 @@ const CelloTuner = (() => {
     const inputLevel = rmsToLevelPercent(lastRms);
 
     if (!lastRawFreq || freqHistory.length === 0) {
+      const noSignal = !nonZeroEverSeen && (performance.now() - startedAtTime > 1500);
       return {
         micOn: true,
-        state: 'silent',
+        state: noSignal ? 'nosignal' : 'silent',
         detectedFreq: null,
         detectedNoteName: '—',
         cents: 0,
@@ -442,6 +490,9 @@ const CelloTuner = (() => {
     stop,
     getActive,
     resumeIfNeeded,
+    listMicrophones,
+    getActiveDeviceLabel,
+    getSelectedDeviceId,
     sample,
   };
 })();
